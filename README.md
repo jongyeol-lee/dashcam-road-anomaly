@@ -37,7 +37,7 @@ MP4 업로드 → 프레임 추출 → YOLO 추론 → 연속 프레임 중복 �
 
 ## 현재 구현 상태
 
-초기 프로젝트 구조와 개발환경을 구성했습니다. Windows x64의 독립 가상환경에서 CUDA 텐서 연산과 torchvision NMS를 실행했고, 합성 MP4의 프레임 디코딩을 확인했습니다. 데이터셋 확보와 품질 검증, 실제 블랙박스 영상 테스트, 모델 학습·평가, 영상 분석 파이프라인과 웹 서비스 구현은 예정 단계입니다.
+Windows x64의 독립 가상환경에서 CUDA 텐서 연산과 torchvision NMS를 검증했습니다. OpenCV로 합성 MP4를 생성하고 지정한 시간 간격으로 JPG와 타임스탬프 CSV를 추출할 수 있습니다. 데이터셋 확보와 품질 검증, 실제 블랙박스 영상 테스트, 모델 학습·평가, 웹 서비스 구현은 예정 단계입니다.
 
 | 경로 | 용도 |
 | --- | --- |
@@ -50,3 +50,17 @@ MP4 업로드 → 프레임 추출 → YOLO 추론 → 연속 프레임 중복 �
 | `outputs/` | 학습·추론·평가 산출물 |
 
 데이터와 실험 산출물은 로컬에 보관합니다. 데이터 출처와 폴더 사용법은 `docs/` 또는 해당 경로 최상위 `README.md`에 기록할 수 있습니다.
+
+## MP4 프레임 추출
+
+프로젝트 루트에서 합성 MP4를 생성하고 1초 간격으로 프레임을 추출합니다.
+
+```powershell
+.\.venv\Scripts\python.exe -B scripts\make_test_video.py
+.\.venv\Scripts\python.exe -B scripts\extract_frames.py data\raw\test_3sec.mp4 --interval 1
+.\.venv\Scripts\python.exe -B -m unittest discover -s tests -v
+```
+
+합성 영상은 `data/raw/test_3sec.mp4`에 저장됩니다. 생성 경로를 바꾸려면 `--output`을 사용합니다. 추출 결과는 기본으로 `data/processed/frames/<영상파일명에서 확장자를 뺀 이름>/`에 저장되며, `--output-dir`로 바꿀 수 있습니다. 재실행할 때는 새로운 영상 저장 경로나 비어 있는 추출 폴더를 지정합니다.
+
+추출은 0초부터 시작하며, 각 간격의 기준 시각에 도달한 첫 프레임을 저장합니다. `frames.csv`에는 원본 프레임 번호 `frame_index`(0부터 시작), `frame_index / FPS`로 계산한 `estimated_time_sec`, 프레임을 읽은 직후 OpenCV가 반환한 `decoder_time_ms`, JPG 파일명 `image_file`이 기록됩니다. 가변 FPS 영상에서는 추출 시점과 추정 시간이 실제 표시 시각과 다를 수 있습니다. 디코더 시간은 영상과 OpenCV 백엔드가 제공하는 값입니다.

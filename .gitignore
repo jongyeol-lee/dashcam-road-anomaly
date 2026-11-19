@@ -69,3 +69,6 @@ credentials.json
 *.engine
 *.torchscript
 *.tflite
+
+# VS Code 개인 개발환경 설정
+.vscode/

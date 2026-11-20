@@ -37,7 +37,7 @@ MP4 업로드 → 프레임 추출 → YOLO 추론 → 연속 프레임 중복 �
 
 ## 현재 구현 상태
 
-Windows x64의 독립 가상환경에서 CUDA 텐서 연산과 torchvision NMS를 검증했습니다. OpenCV로 합성 MP4를 생성하고 지정한 시간 간격으로 JPG와 타임스탬프 CSV를 추출할 수 있습니다. 데이터셋 확보와 품질 검증, 실제 블랙박스 영상 테스트, 모델 학습·평가, 웹 서비스 구현은 예정 단계입니다.
+Windows x64의 독립 가상환경에서 CUDA 텐서 연산과 torchvision NMS를 검증했습니다. OpenCV로 합성 MP4를 생성하고 지정한 시간 간격으로 JPG와 타임스탬프 CSV를 추출할 수 있습니다. RDD2022 Czech 이미지와 XML을 검증하고 YOLO 학습용 데이터셋으로 변환할 수 있습니다. Czech v2에서 YOLO11n Baseline 학습과 Validation 평가를 완료했습니다. 실제 블랙박스 영상 테스트와 웹 서비스 구현은 예정 단계입니다. [YOLO11n 실험 보고서](docs/experiments/yolo11n_baseline.md)
 
 | 경로 | 용도 |
 | --- | --- |
@@ -50,6 +50,19 @@ Windows x64의 독립 가상환경에서 CUDA 텐서 연산과 torchvision NMS�
 | `outputs/` | 학습·추론·평가 산출물 |
 
 데이터와 실험 산출물은 로컬에 보관합니다. 데이터 출처와 폴더 사용법은 `docs/` 또는 해당 경로 최상위 `README.md`에 기록할 수 있습니다.
+
+## RDD2022 Czech 데이터 준비
+
+프로젝트 루트에서 `--zip-path`에 원본 `Czech.zip` 경로를 지정합니다. 이미 풀린 데이터는 `train`과 `test`가 들어 있는 Czech 폴더를 `--czech-dir`로 지정할 수 있습니다. PowerShell에서 공백이나 `&`가 있는 경로는 작은따옴표로 감쌉니다.
+
+```powershell
+.\.venv\Scripts\python.exe -B -X utf8 scripts\prepare_rdd2022_czech.py --zip-path 'C:\path\to\Czech.zip'
+.\.venv\Scripts\python.exe -B -m unittest discover -s tests -v
+```
+
+라벨이 있는 원본 Train 이미지를 seed 42와 80/10/10 목표 비율로 분할합니다. 분할마다 클래스별 객체와 등장 이미지, 빈 라벨 이미지가 고르게 들어가도록 배정합니다. JPG의 SHA-256 또는 128비트 dHash 해밍 거리 8 이하로 연결된 이미지 후보는 한 그룹에 배정합니다. 공식 Test의 이미지는 유사도 비교에 포함되고, mAP 평가용 Test는 라벨이 있는 Train에서 구성합니다. 주행 구간과 영상 ID 없이 시각적 유사도만 비교하므로 놓친 유사 장면으로 데이터 누수 가능성이 남습니다. [RDD2022 데이터 설명](https://crddc2022.sekilab.global/data/)
+
+`data/processed/rdd2022_czech/`에 검사 결과와 `split_manifest.csv`, 변환한 라벨을 JPG에 표시한 미리보기가 저장됩니다. 파일 검사에 실패하면 `inspection_summary.json`에서 파일별 오류 유형과 원인을 확인할 수 있습니다. `data/yolo/rdd2022_czech/data.yaml`은 YAML 파일이 있는 폴더를 기준으로 Train·Val·Test 이미지 경로와 `D00`, `D10`, `D20`, `D40` 순서의 클래스를 정의합니다. 기존 출력 경로가 있다면 재실행 시 `--processed-dir`과 `--yolo-dir`로 새 경로를 지정합니다. [Ultralytics 탐지 데이터셋 형식](https://docs.ultralytics.com/datasets/detect)
 
 ## MP4 프레임 추출
 

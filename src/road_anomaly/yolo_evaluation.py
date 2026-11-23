@@ -79,10 +79,14 @@ def _read_truth(path: Path, width: int, height: int) -> list[Detection]:
 
 
 def _render(case: Case, path: Path, *, confidence_digits: int = 2) -> None:
-    frame = cv2.imdecode(np.frombuffer(case.image.read_bytes(), dtype=np.uint8), cv2.IMREAD_COLOR)
+    render_panels(case.image, (("Ground truth", case.truth), ("Prediction", case.predictions)), path, confidence_digits)
+
+
+def render_panels(image: Path, groups, path: Path, confidence_digits: int = 2) -> None:
+    frame = cv2.imdecode(np.frombuffer(image.read_bytes(), dtype=np.uint8), cv2.IMREAD_COLOR)
     colors = ((64, 218, 255), (37, 230, 99), (244, 155, 80), (90, 77, 255))
     panels = []
-    for title, boxes in (("Ground truth", case.truth), ("Prediction", case.predictions)):
+    for title, boxes in groups:
         panel = cv2.copyMakeBorder(frame, 34, 0, 0, 0, cv2.BORDER_CONSTANT, value=(22, 25, 30))
         cv2.putText(panel, f"{title} | {len(boxes)} boxes", (12, 23), cv2.FONT_HERSHEY_SIMPLEX,
                     0.62, (255, 255, 255), 1, cv2.LINE_AA)
@@ -96,9 +100,10 @@ def _render(case: Case, path: Path, *, confidence_digits: int = 2) -> None:
             origin = (x0, max(48, y0 + 30))
             cv2.putText(panel, text, origin, cv2.FONT_HERSHEY_SIMPLEX, 0.48, (16, 16, 16), 3, cv2.LINE_AA)
             cv2.putText(panel, text, origin, cv2.FONT_HERSHEY_SIMPLEX, 0.48, color, 1, cv2.LINE_AA)
+        if panels:
+            panels.append(np.full((panel.shape[0], 6, 3), 30, dtype=np.uint8))
         panels.append(panel)
-    divider = np.full((panels[0].shape[0], 6, 3), 30, dtype=np.uint8)
-    encoded, data = cv2.imencode(".png", np.hstack((panels[0], divider, panels[1])))
+    encoded, data = cv2.imencode(".png", np.hstack(panels))
     if not encoded:
         raise RuntimeError(f"Validation 사례를 인코딩할 수 없습니다. {path}")
     with path.open("xb") as handle:
@@ -143,11 +148,12 @@ def _select_cases(candidates: dict[str, list[Case]]) -> list[Case]:
     return selected
 
 
-def _qualitative(model, images_dir: Path, val_pairs: list[tuple[Path, Path]], output_dir: Path) -> dict:
+def _qualitative(model, images_dir: Path, val_pairs: list[tuple[Path, Path]], output_dir: Path, *, save_boxes=False) -> dict:
     remaining = {image.name: (image, label) for image, label in val_pairs}
     candidates = defaultdict(list)
     counts = {label: Counter() for label in CLASSES}
     confusion = Counter()
+    frames = {}
     for result in model.predict(str(images_dir), stream=True, batch=4, imgsz=640, device=0, conf=CASE_CONFIDENCE,
                                 iou=0.7, max_det=300, rect=False, save=False, verbose=False, quantize=None):
         image, annotation = remaining.pop(Path(result.path).name)
@@ -157,6 +163,9 @@ def _qualitative(model, images_dir: Path, val_pairs: list[tuple[Path, Path]], ou
             result.boxes.xyxy.tolist(), result.boxes.cls.tolist(), result.boxes.conf.tolist(), strict=True,
         )]
         base = (image, truth, predictions)
+        if save_boxes:
+            frames[image.name] = {"truth": [asdict(box) for box in truth],
+                                  "predictions": [asdict(box) for box in predictions]}
         for gt in truth:
             counts[CLASSES[gt.class_id]]["ground_truth"] += 1
         for pred in predictions:
@@ -188,6 +197,9 @@ def _qualitative(model, images_dir: Path, val_pairs: list[tuple[Path, Path]], ou
             candidates[kind].append(Case(*base, kind, pred=pred))
     if remaining:
         raise RuntimeError(f"정성 분석 중 Validation 이미지 {len(remaining)}장을 읽지 못했습니다.")
+    if save_boxes:
+        with (output_dir / "frames.json").open("x", encoding="utf-8") as handle:
+            json.dump(frames, handle, ensure_ascii=False, allow_nan=False)
 
     gallery = output_dir / "cases"
     gallery.mkdir()
@@ -208,7 +220,7 @@ def _qualitative(model, images_dir: Path, val_pairs: list[tuple[Path, Path]], ou
     }
 
 
-def evaluate_best(best: Path, data_yaml: Path, val_pairs: list[tuple[Path, Path]], output_dir: Path) -> dict:
+def evaluate_best(best: Path, data_yaml: Path, val_pairs: list[tuple[Path, Path]], output_dir: Path, *, save_boxes=False) -> dict:
     """best.pt의 Validation 지표와 GT/예측을 나란히 표시한 오류 사례를 저장한다."""
     from ultralytics import YOLO
 
@@ -237,7 +249,7 @@ def evaluate_best(best: Path, data_yaml: Path, val_pairs: list[tuple[Path, Path]
     }
     with (output_dir / "metrics.json").open("x", encoding="utf-8") as handle:
         json.dump(summary, handle, ensure_ascii=False, indent=2, allow_nan=False)
-    qualitative = _qualitative(model, data_yaml.parent / "images/val", val_pairs, output_dir)
+    qualitative = _qualitative(model, data_yaml.parent / "images/val", val_pairs, output_dir, save_boxes=save_boxes)
     with (output_dir / "qualitative.json").open("x", encoding="utf-8") as handle:
         json.dump(qualitative, handle, ensure_ascii=False, indent=2, allow_nan=False)
     return {**summary, "qualitative_cases": len(qualitative["cases"])}

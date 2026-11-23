@@ -35,7 +35,7 @@ ReadMember = Callable[[str], bytes]
 @dataclass(frozen=True)
 class Box:
     category: str
-    xyxy: tuple[int, int, int, int]
+    xyxy: tuple[float, float, float, float]
 
 
 @dataclass(frozen=True)
@@ -212,6 +212,17 @@ def _distribution(images: list[Image]) -> dict:
 
 
 def _group_images(images: list[Image]) -> tuple[dict[str, str], list[dict]]:
+    pairs = []
+    # 모든 쌍을 작은 정수의 해밍 거리로 비교한다.
+    for a, b in combinations(images, 2):
+        identical = a.digest == b.digest
+        distance = (a.dhash ^ b.dhash).bit_count()
+        if identical or distance <= D_HASH_DISTANCE:
+            pairs.append({"a": a.member, "b": b.member, "identical": identical, "distance": distance})
+    return _connected_groups(images, pairs), pairs
+
+
+def _connected_groups(images: list[Image], pairs: list[dict]) -> dict[str, str]:
     parents = {image.member: image.member for image in images}
 
     def root(member: str) -> str:
@@ -220,16 +231,10 @@ def _group_images(images: list[Image]) -> tuple[dict[str, str], list[dict]]:
             member = parents[member]
         return member
 
-    pairs = []
-    # 모든 쌍을 작은 정수의 해밍 거리로 비교하고 연결된 후보를 한 그룹에 넣는다.
-    for a, b in combinations(images, 2):
-        identical = a.digest == b.digest
-        distance = (a.dhash ^ b.dhash).bit_count()
-        if identical or distance <= D_HASH_DISTANCE:
-            pairs.append({"a": a.member, "b": b.member, "identical": identical, "distance": distance})
-            left, right = sorted((root(a.member), root(b.member)))
-            parents[right] = left
-    return {member: root(member) for member in parents}, pairs
+    for pair in pairs:
+        left, right = sorted((root(pair["a"]), root(pair["b"])))
+        parents[right] = left
+    return {member: root(member) for member in parents}
 
 
 def _assign_splits(images: list[Image], group_ids: dict[str, str]) -> tuple[dict[str, str], dict[str, int]]:
@@ -320,21 +325,34 @@ def _write_file(path: Path, data: bytes, cleanup: ExitStack) -> None:
         handle.write(data)
 
 
-def _save_preview(data: bytes, boxes: list[Box], path: Path, cleanup: ExitStack) -> None:
-    frame = _decode_jpeg(data)
+def _draw_boxes(frame: np.ndarray, boxes: tuple[Box, ...] | list[Box]) -> None:
     height, width = frame.shape[:2]
     colors = ((64, 218, 255), (37, 230, 99), (244, 155, 80), (90, 77, 255))
     for box in boxes:
-        x0, y0, x1, y1 = box.xyxy
+        x0, y0, x1, y1 = (round(coordinate) for coordinate in box.xyxy)
         color = colors[CLASSES.index(box.category)]
         cv2.rectangle(frame, (x0, y0), (min(x1, width - 1), min(y1, height - 1)), color, 2)
         origin = (x0, max(14, y0 - 4))
         cv2.putText(frame, box.category, origin, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (15, 15, 15), 3, cv2.LINE_AA)
         cv2.putText(frame, box.category, origin, cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
+
+
+def _save_preview(data: bytes, boxes: list[Box], path: Path, cleanup: ExitStack) -> None:
+    frame = _decode_jpeg(data)
+    _draw_boxes(frame, boxes)
     encoded, png = cv2.imencode(".png", frame)
     if not encoded:
         raise RuntimeError(f"BBox 미리보기를 저장할 수 없습니다. {path}")
     _write_file(path, png.tobytes(), cleanup)
+
+
+def _dataset_yaml(splits: tuple[str, ...]) -> bytes:
+    # Ultralytics는 train 키가 필요하며, 평가 전용 데이터의 학습 경로는 null로 둔다.
+    yaml = "" if "train" in splits else "train: null\n"
+    # path를 생략하면 data.yaml의 부모 폴더를 데이터셋 루트로 사용한다.
+    yaml += "".join(f"{split}: images/{split}\n" for split in splits)
+    yaml += "names:\n" + "".join(f"  {index}: {category}\n" for index, category in enumerate(CLASSES))
+    return yaml.encode("utf-8")
 
 
 def _export(
@@ -400,10 +418,7 @@ def _export(
     if after != _distribution(images)["objects"]:
         raise ValueError("변환 전후 클래스별 객체 수가 다릅니다.")
     _write_file(processed_dir / "split_manifest.csv", manifest.getvalue().encode("utf-8-sig"), cleanup)
-    # path 키를 생략하면 Ultralytics가 data.yaml의 부모 폴더를 데이터셋 루트로 사용한다.
-    yaml = "".join(f"{split}: images/{split}\n" for split in SPLITS)
-    yaml += "names:\n" + "".join(f"  {index}: {category}\n" for index, category in enumerate(CLASSES))
-    _write_file(yolo_dir / "data.yaml", yaml.encode("utf-8"), cleanup)
+    _write_file(yolo_dir / "data.yaml", _dataset_yaml(SPLITS), cleanup)
     return {"objects": after, "max_bbox_roundtrip_error_px": max_error, "previews": saved_previews}
 
 

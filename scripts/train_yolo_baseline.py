@@ -151,12 +151,12 @@ def stage_dataset(run_dir: Path, train: list[tuple[Path, Path]], val: list[tuple
 
 def train_model(
     model, dataset: dict, data_path: Path, weights: Path, run_dir: Path, smoke: bool, runtime: dict, *,
-    cls_pw: float | None = None,
+    cls_pw: float | None = None, split_counts: dict | None = None, max_epochs: int = 30,
 ) -> dict:
     import torch
     from ultralytics.utils import LOGGER
 
-    epochs = 1 if smoke else 30
+    epochs = 1 if smoke else max_epochs
     train = select_train(dataset["train"], smoke)
     options = TRAIN_OPTIONS.copy()
     class_weights = []
@@ -210,7 +210,7 @@ def train_model(
         if not checkpoint.is_file() or not checkpoint.stat().st_size:
             raise FileNotFoundError(checkpoint)
     summary = {
-        "stage": "smoke" if smoke else "train", "dataset": str(data_path), "split_counts": COUNTS,
+        "stage": "smoke" if smoke else "train", "dataset": str(data_path), "split_counts": split_counts or COUNTS,
         "training_images": len(train), "smoke_images": [image.name for image, _ in train] if smoke else [],
         "weights": str(weights), "weights_url": WEIGHTS_URL, "weights_sha256": WEIGHTS_SHA256,
         "runtime": runtime, "options": {**options, "epochs": epochs}, "completed_epochs": completed,

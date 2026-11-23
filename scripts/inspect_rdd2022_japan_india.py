@@ -87,12 +87,20 @@ def _bbox_issues(
 def _inspect_xml(
     data: bytes, image_name: str, image_size: tuple[int, int] | None,
 ) -> tuple[Counter[str] | None, bool, list[AnnotationIssue]]:
+    _, counts, compared_size, issues = _read_annotation(data, image_name, image_size)
+    return counts, compared_size, issues
+
+
+def _read_annotation(
+    data: bytes, image_name: str, image_size: tuple[int, int] | None,
+) -> tuple[ET.Element | None, Counter[str] | None, bool, list[AnnotationIssue]]:
+    """Train 검사와 YOLO 변환에서 동일한 원본 XML과 검증 규칙을 사용한다."""
     try:
         root = ET.fromstring(data)
     except (ET.ParseError, LookupError, ValueError) as error:
-        return None, False, [AnnotationIssue("invalid_xml", str(error))]
+        return None, None, False, [AnnotationIssue("invalid_xml", str(error))]
     if root.tag != "annotation":
-        return None, False, [AnnotationIssue("invalid_xml", f"루트 요소 {root.tag!r}")]
+        return None, None, False, [AnnotationIssue("invalid_xml", f"루트 요소 {root.tag!r}")]
 
     issues = []
     filename = (root.findtext("filename") or "").strip()
@@ -120,7 +128,7 @@ def _inspect_xml(
             issues.append(AnnotationIssue("unknown_class", f"분류가 확인되지 않은 코드 {category!r}", index, category))
         issues.extend(AnnotationIssue(kind, detail, index, category)
                       for kind, detail in _bbox_issues(obj, xml_size, image_size))
-    return counts, compared_size, issues
+    return root, counts, compared_size, issues
 
 
 def _jpeg_size(data: bytes) -> tuple[int, int]:

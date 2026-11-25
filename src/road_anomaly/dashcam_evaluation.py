@@ -178,7 +178,7 @@ def detection_record(box: IdentifiedDetection) -> dict:
 
 
 def evaluate_image(image: EvaluationImage, predictions: tuple[IdentifiedDetection, ...],
-                   positions: dict[str, BoxPosition]) -> dict:
+                   positions: dict[str, BoxPosition] | None = None) -> dict:
     """동일 클래스 정탐을 먼저 정한 뒤 남은 박스에 승인 범위별 판정을 기록한다."""
     if image.scope == "excluded":
         raise ValueError(f"전체 제외 이미지는 평가할 수 없습니다. {image.image_id}")
@@ -228,7 +228,8 @@ def evaluate_image(image: EvaluationImage, predictions: tuple[IdentifiedDetectio
         pred_rows.append({
             **detection_record(pred), "disposition": disposition, "matched_gt_id": gt_id,
             "matched_iou": matches[gt_id][1] if gt_id else None, "uncertain_fraction": coverage,
-            "class_confusions": confusions[pred.box_id], "roi_b": asdict(positions[pred.box_id]),
+            "class_confusions": confusions[pred.box_id],
+            **({"roi_b": asdict(positions[pred.box_id])} if positions is not None else {}),
         })
     return {"image_id": image.image_id, "revision": image.revision, "source_video": image.source_video,
             "scope": image.scope, "ground_truth": gt_rows, "predictions": pred_rows}

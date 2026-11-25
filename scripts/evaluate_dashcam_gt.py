@@ -97,15 +97,27 @@ def runtime_info(torch) -> dict:
     }
 
 
-def infer(name: str, model, frames: tuple[EvaluationImage, ...], images: dict[str, np.ndarray], torch) -> dict:
+def infer(name: str, model, frames: tuple[EvaluationImage, ...], images: dict[str, np.ndarray], torch,
+          *, imgsz: int = OPTIONS["imgsz"], measure_resolution: bool = False) -> dict:
     """배치 1로 매니페스트 순서대로 각 실영상 프레임을 한 번 추론한다."""
     first_image = images[frames[0].image_id]
-    tensor_shape = (OPTIONS["batch"], 3, OPTIONS["imgsz"], OPTIONS["imgsz"])
+    options = {**OPTIONS, "imgsz": imgsz}
+    tensor_shape = (options["batch"], 3, imgsz, imgsz)
+    predict_kwargs = {}
+    if measure_resolution:
+        from ultralytics.models.yolo.detect.predict import DetectionPredictor
+
+        class MeasuredPredictor(DetectionPredictor):
+            def inference(self, im, *args, **kwargs):
+                self.observed_input = (tuple(im.shape), str(im.dtype), str(im.device))
+                return super().inference(im, *args, **kwargs)
+
+        predict_kwargs["predictor"] = MeasuredPredictor
     records, timings = [], []
     torch.cuda.synchronize(DEVICE)
     start = perf_counter()
     # 실제 이미지는 스트림 소비 시에만 추론된다. 여기서 장치 이동과 모델 fuse 시간을 따로 잰다.
-    with closing(model.predict(first_image, stream=True, **OPTIONS)) as first_results:
+    with closing(model.predict(first_image, stream=True, **options, **predict_kwargs)) as first_results:
         predictor = model.predictor
         torch.cuda.synchronize(DEVICE)
         backend_setup_ms = (perf_counter() - start) * 1000
@@ -118,13 +130,18 @@ def infer(name: str, model, frames: tuple[EvaluationImage, ...], images: dict[st
         torch.cuda.synchronize(DEVICE)
         warmup_ms = (perf_counter() - start) * 1000
         predictor.done_warmup = True
+        if measure_resolution:
+            del dummy
+            torch.cuda.reset_peak_memory_stats(DEVICE)
 
         for index, frame in enumerate(frames):
             start = perf_counter()
-            results = list(first_results) if index == 0 else model.predict(images[frame.image_id], **OPTIONS)
+            results = list(first_results) if index == 0 else model.predict(images[frame.image_id], **options)
             torch.cuda.synchronize(DEVICE)
             prediction_wall_ms = (perf_counter() - start) * 1000
-            expected_hw = (OPTIONS["imgsz"],) * 2
+            expected_hw = (imgsz,) * 2
+            if measure_resolution and predictor.observed_input != (tensor_shape, "torch.float32", DEVICE):
+                raise RuntimeError(f"실제 입력 텐서 불일치: {predictor.observed_input}")
             if (len(results) != 1 or results[0].orig_shape != SIZE[::-1] or predictor.dataset.bs != 1
                     or tuple(predictor.imgsz) != expected_hw or model.predictor is not predictor):
                 raise RuntimeError(f"실제 추론 배치 또는 해상도가 예상과 다릅니다. {name} {frame.image_id}")
@@ -141,12 +158,16 @@ def infer(name: str, model, frames: tuple[EvaluationImage, ...], images: dict[st
             records.append({**frame_record(frame), "predictions": predictions, "timing_ms": timing})
 
     effective = {key: getattr(predictor.args, key) for key in OPTIONS}
-    if effective != OPTIONS:
+    if effective != options:
         raise RuntimeError(f"실제 YOLO 설정이 사전 조건과 다릅니다. {name}: {effective}")
     return {
         "model": name, "frames": records, "options": effective, "class_names": model.names,
         "backend": predictor.model.format, "input_tensor_shape": tensor_shape,
-        "input_dtype": str(dummy.dtype), "weight_dtype": str(next(predictor.model.model.parameters()).dtype),
+        "input_dtype": predictor.observed_input[1] if measure_resolution else str(dummy.dtype),
+        **({"input_tensor_shape": predictor.observed_input[0],
+            "peak_allocated_bytes": torch.cuda.max_memory_allocated(DEVICE),
+            "peak_reserved_bytes": torch.cuda.max_memory_reserved(DEVICE)} if measure_resolution else {}),
+        "weight_dtype": str(next(predictor.model.model.parameters()).dtype),
         "batch_size": predictor.dataset.bs, "class_aware_nms": not predictor.args.agnostic_nms,
         "cuda_matmul_allow_tf32": torch.backends.cuda.matmul.allow_tf32,
         "cudnn_allow_tf32": torch.backends.cudnn.allow_tf32,

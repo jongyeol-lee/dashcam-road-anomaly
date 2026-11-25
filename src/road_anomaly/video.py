@@ -1,12 +1,14 @@
 import csv
 import math
-from contextlib import ExitStack
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from fractions import Fraction
 from itertools import count
 from pathlib import Path
 
 import cv2
+import numpy as np
 
 
 DEFAULT_FRAMES_ROOT = Path(__file__).resolve().parents[2] / "data/processed/frames"
@@ -22,6 +24,43 @@ class ExtractionResult:
     extracted_count: int
 
 
+@dataclass(frozen=True)
+class VideoMetadata:
+    fps: float
+    width: int
+    height: int
+    frame_count: int
+
+
+@contextmanager
+def open_video_capture(video_path: Path) -> Iterator[tuple[cv2.VideoCapture, VideoMetadata]]:
+    """원본 영상을 읽기 전용으로 열고 디코더가 보고한 메타데이터를 반환한다."""
+    if not video_path.is_file():
+        raise FileNotFoundError(f"MP4 파일을 찾을 수 없습니다. {video_path}")
+    capture = cv2.VideoCapture(str(video_path))
+    try:
+        if not capture.isOpened():
+            raise RuntimeError(f"MP4 파일을 열 수 없습니다. {video_path}")
+        fps = capture.get(cv2.CAP_PROP_FPS)
+        if not math.isfinite(fps) or fps <= 0:
+            raise ValueError(f"영상의 FPS가 유효하지 않습니다. {fps}")
+        yield capture, VideoMetadata(
+            fps, int(capture.get(cv2.CAP_PROP_FRAME_WIDTH)), int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+            int(capture.get(cv2.CAP_PROP_FRAME_COUNT)),
+        )
+    finally:
+        capture.release()
+
+
+def iter_decoded_frames(capture: cv2.VideoCapture) -> Iterator[tuple[int, np.ndarray]]:
+    """현재 위치가 영상 시작인 디코더에서 원본 프레임 번호와 이미지를 순서대로 읽는다."""
+    for frame_index in count():
+        decoded, frame = capture.read()
+        if not decoded:
+            break
+        yield frame_index, frame
+
+
 def extract_frames(
     video_path: Path, interval: float = 1.0, output_dir: Path | None = None,
 ) -> ExtractionResult:
@@ -32,29 +71,16 @@ def extract_frames(
     """
     if not math.isfinite(interval) or interval <= 0:
         raise ValueError("추출 간격은 0보다 큰 유한한 숫자(초)여야 합니다.")
-    if not video_path.is_file():
-        raise FileNotFoundError(f"MP4 파일을 찾을 수 없습니다. {video_path}")
     if output_dir is None:
         output_dir = DEFAULT_FRAMES_ROOT / video_path.stem
 
-    capture = cv2.VideoCapture(str(video_path))
-    try:
-        if not capture.isOpened():
-            raise RuntimeError(f"MP4 파일을 열 수 없습니다. {video_path}")
-        fps = capture.get(cv2.CAP_PROP_FPS)
-        if not math.isfinite(fps) or fps <= 0:
-            raise ValueError(f"영상의 FPS가 유효하지 않습니다. {fps}")
-
-        width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
-
+    with open_video_capture(video_path) as (capture, metadata):
         output_dir.mkdir(parents=True, exist_ok=True)
         if any(output_dir.iterdir()):
             raise FileExistsError(f"출력 경로가 비어 있지 않습니다. {output_dir}")
 
         # 소수 간격의 경계를 정수 연산으로 비교해 반올림 때문에 한 프레임이 밀리는 것을 방지한다.
-        frames_per_interval = Fraction(str(interval)) * Fraction(str(fps))
+        frames_per_interval = Fraction(str(interval)) * Fraction(str(metadata.fps))
         last_interval_index = -1
         extracted_count = 0
         csv_path = output_dir / "frames.csv"
@@ -65,10 +91,7 @@ def extract_frames(
                 writer = csv.writer(csv_file)
                 writer.writerow(("frame_index", "estimated_time_sec", "decoder_time_ms", "image_file"))
 
-                for frame_index in count():
-                    decoded, frame = capture.read()
-                    if not decoded:
-                        break
+                for frame_index, frame in iter_decoded_frames(capture):
                     interval_index = (
                         frame_index * frames_per_interval.denominator // frames_per_interval.numerator
                     )
@@ -83,14 +106,11 @@ def extract_frames(
                     with image_path.open("xb") as image_file:
                         cleanup.callback(image_path.unlink, missing_ok=True)
                         image_file.write(jpeg)
-                    writer.writerow((frame_index, frame_index / fps, decoder_time_ms, image_path.name))
+                    writer.writerow((frame_index, frame_index / metadata.fps, decoder_time_ms, image_path.name))
                     last_interval_index = interval_index
                     extracted_count += 1
 
                 if extracted_count == 0:
                     raise RuntimeError(f"MP4에서 프레임을 읽을 수 없습니다. {video_path}")
             cleanup.pop_all()
-    finally:
-        capture.release()
-
-    return ExtractionResult(output_dir, fps, width, height, frame_count, extracted_count)
+    return ExtractionResult(output_dir, metadata.fps, metadata.width, metadata.height, metadata.frame_count, extracted_count)

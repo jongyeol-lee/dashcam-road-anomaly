@@ -93,6 +93,7 @@ class VideoAnalysisTest(unittest.TestCase):
             "event_id": "event_0001", "class_id": 0, "class_name": "D00",
             "start_time_sec": 0.0, "last_detection_time_sec": 0.8, "max_confidence": 0.95,
             "representative_frame_index": 8, "representative_time_sec": 0.8,
+            "representative_xyxy": [96, 44, 132, 73],
             "representative_image": "scenes/event_0001.jpg", "detection_count": 3, "detected_frame_count": 2,
         })
         for event in events:
@@ -117,6 +118,10 @@ class VideoAnalysisTest(unittest.TestCase):
         self.assertEqual(summary["timestamp_basis"], "frame_index / fps")
         self.assertEqual((summary["detection_count"], summary["event_count"]), (5, 3))
         self.assertGreater(summary["analysis_seconds"], 0)
+        self.assertAlmostEqual(sum(summary["timing_seconds"].values()), summary["analysis_seconds"])
+        self.assertAlmostEqual(summary["analysis_to_duration_ratio"], summary["analysis_seconds"] / 3)
+        self.assertEqual(summary["detected_frame_count"], 3)
+        self.assertAlmostEqual(summary["box_to_event_reduction"], 0.4)
         self.assertEqual(sha256(self.video.read_bytes()).hexdigest(), video_digest)
         self.assertEqual(sha256(self.checkpoint.read_bytes()).hexdigest(), model_digest)
 
@@ -128,6 +133,8 @@ class VideoAnalysisTest(unittest.TestCase):
         output_dir = Path(summary["output_dir"])
         self.assertRegex(output_dir.name, r"^\d{8}_\d{6}_\d{6}Z$")
         self.assertEqual(summary["settings"]["device"], "cpu")
+        self.assertEqual((summary["profile"], summary["settings"]["imgsz"]), ("baseline", 640))
+        self.assertIsNone(summary["box_to_event_reduction"])
         self.assertEqual((summary["detection_count"], summary["event_count"]), (0, 0))
         self.assertEqual(summary["video"]["extracted_frame_count"], 3)
         self.assertEqual((output_dir / "events.json").read_text(encoding="utf-8").strip(), "[]")
@@ -137,6 +144,11 @@ class VideoAnalysisTest(unittest.TestCase):
 
     def test_rejects_invalid_inputs_before_creating_outputs(self) -> None:
         cases = [
+            ({"imgsz": 0}, ValueError, "imgsz"),
+            ({"imgsz": -1}, ValueError, "imgsz"),
+            ({"imgsz": 640.5}, ValueError, "imgsz"),
+            ({"imgsz": True}, ValueError, "imgsz"),
+            ({"profile": "unknown"}, ValueError, "프로필"),
             ({"interval": 0}, ValueError, "추출 간격"),
             ({"interval": float("inf")}, ValueError, "추출 간격"),
             ({"confidence": -0.1}, ValueError, "Confidence"),
@@ -156,6 +168,56 @@ class VideoAnalysisTest(unittest.TestCase):
         self.assertFalse(self.frames_root.exists())
         self.assertFalse(self.analysis_root.exists())
         self.yolo.assert_not_called()
+
+    def test_mvp_defaults_and_explicit_overrides(self):
+        self.model.names = dict(enumerate(video_analysis.CLASSES))
+        profile = video_analysis.PROFILES["mvp"]
+        self.assertEqual(profile["model_path"], video_analysis.MVP_MODEL)
+        self.assertEqual(profile["device"], "cuda:0")
+        with patch.object(video_analysis, "_prepare_mvp_predictor", return_value={"frames": 6}):
+            summary = self.analyze(profile="mvp")
+        settings = summary["settings"]
+        self.assertEqual((settings["imgsz"], settings["interval_sec"], settings["conf"], settings["max_gap_sec"]),
+                         (1280, 0.5, 0.05, 1.5))
+        self.assertEqual(settings["batch"], 1)
+        self.assertIsNone(settings["quantize"])
+        self.assertFalse(settings["agnostic_nms"])
+        self.assertEqual(summary["inferred_frame_count"], 6)
+        self.assertEqual(summary["model"]["path"], str(self.checkpoint))
+        with patch.object(video_analysis, "_prepare_mvp_predictor", return_value={"frames": 3}):
+            summary = self.analyze(run_name="override", profile="mvp", imgsz=960, confidence=0, interval=1, max_gap=0)
+        options = self.model.predict.call_args.kwargs
+        self.assertEqual((options["imgsz"], options["conf"], options["device"]), (960, 0, "cpu"))
+        self.assertEqual((summary["settings"]["interval_sec"], summary["settings"]["max_gap_sec"]), (1, 0))
+        self.assertEqual(profile["predict"]["imgsz"], 1280)
+
+    def test_mvp_rejects_incompatible_classes(self):
+        self.model.names = {0: "other"}
+        with self.assertRaisesRegex(ValueError, "클래스 매핑"):
+            self.analyze(profile="mvp")
+        self.model.predict.assert_not_called()
+        self.assert_run_removed()
+
+    def test_pinned_weight_hash_is_checked_before_yolo_load(self):
+        with (patch.dict(sys.modules, {"ultralytics": SimpleNamespace(YOLO=self.yolo)}),
+              self.assertRaisesRegex(RuntimeError, "SHA-256")):
+            video_analysis._load_model(self.checkpoint, expected_sha256=video_analysis.MVP_SHA256)
+        self.yolo.assert_not_called()
+
+    def test_cli_defers_defaults_and_passes_profile_and_imgsz(self):
+        import os
+        from scripts import analyze_video as cli
+
+        response = {"video": {"extracted_frame_count": 3}, "detection_count": 0, "event_count": 0,
+                    "analysis_seconds": 1, "frames_dir": "frames", "output_dir": "output"}
+        for args, profile, imgsz in (([], "baseline", None), (["--profile", "mvp", "--imgsz", "960"], "mvp", 960)):
+            with (patch.object(sys, "argv", ["analyze_video", str(self.video), *args]), patch.dict(os.environ),
+                  patch.object(cli, "analyze_video", return_value=response) as analyze, patch("builtins.print")):
+                cli.main()
+            options = analyze.call_args.kwargs
+            self.assertEqual((options["profile"], options["imgsz"]), (profile, imgsz))
+            for key in ("model_path", "interval", "confidence", "max_gap", "device"):
+                self.assertIsNone(options[key])
 
     def test_rejects_existing_name_in_either_output_location(self) -> None:
         for name, existing_root, other_root in (

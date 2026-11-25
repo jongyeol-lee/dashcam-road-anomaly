@@ -37,7 +37,7 @@ MP4 입력 → 프레임 추출 → YOLO 추론 → 클래스별 시간 기준 �
 
 ## 현재 구현 상태
 
-Windows x64의 독립 가상환경에서 CUDA 텐서 연산과 torchvision NMS를 검증했습니다. OpenCV로 합성 MP4를 생성하고 지정한 시간 간격으로 JPG와 타임스탬프 CSV를 추출할 수 있습니다. RDD2022 Czech 이미지와 XML을 검증하고 YOLO 학습용 데이터셋으로 변환할 수 있습니다. Czech v2에서 YOLO11n Baseline 학습과 Validation 평가를 완료했으며, MP4 분석 CLI에서 이 모델로 의심 장면을 추출할 수 있습니다. 실제 블랙박스 영상 테스트와 웹 서비스 구현은 예정 단계입니다. [YOLO11n 실험 보고서](docs/experiments/yolo11n_baseline.md)
+Windows x64의 프로젝트 가상환경에서 CUDA와 torchvision NMS를 검증하고, RDD2022 Czech 데이터 변환과 YOLO11n Baseline 학습·Validation 평가를 완료했습니다. MP4 분석 CLI와 Python 함수는 Czech Baseline과 Czech + Japan 혼합 모델을 지원합니다. 혼합 모델의 MVP 프로필로 실제 전·후방 영상 두 편에서 0.5초마다 추출한 141장 모두를 추론하고 대표 장면 22개를 원본 프레임과 대조했습니다. FastAPI 업로드·상태 조회와 React 결과 화면은 Part 6 구현 예정입니다. [Baseline 학습](docs/experiments/yolo11n_baseline.md) · [실제 MP4 검증](docs/experiments/part5_mvp_video_pipeline.md)
 
 | 경로 | 용도 |
 | --- | --- |
@@ -80,16 +80,24 @@ Windows x64의 독립 가상환경에서 CUDA 텐서 연산과 torchvision NMS�
 
 ## MP4 도로환경 이상 분석
 
-프로젝트 루트의 PowerShell에서 기존 YOLO11n Baseline으로 분석합니다. 첫 번째 명령은 입력 MP4 경로를 바꿔 실행합니다. 아래 두 명령은 3초짜리 합성 영상으로 전체 흐름을 확인하는 예시입니다.
+프로젝트 루트의 PowerShell에서 실행합니다. 첫 명령은 기존 Baseline을 사용하고, 둘째 명령은 MVP v1 프로필을 선택합니다. 아래 합성 영상 예시는 기존 기본값을 사용합니다.
 
 ```powershell
 .\.venv\Scripts\python.exe -B -X utf8 scripts\analyze_video.py 'C:\path\to\dashcam.mp4' --run-name dashcam_01
+.\.venv\Scripts\python.exe -B -X utf8 scripts\analyze_video.py 'data\raw\dashcam_validation\Dashcam-Front.mp4' --profile mvp --run-name front_mvp_01
 
 .\.venv\Scripts\python.exe -B -X utf8 scripts\make_test_video.py --output 'data\raw\part5_synthetic.mp4'
 .\.venv\Scripts\python.exe -B -X utf8 scripts\analyze_video.py 'data\raw\part5_synthetic.mp4' --run-name part5_smoke
 ```
 
-기본 모델은 `outputs/yolo_baseline/20261119_yolo11n_640_b4_s42/weights/best.pt`입니다. `--model`로 로컬 탐지용 `.pt` 경로를 지정할 수 있습니다. `--interval`의 기본값은 1.0초, `--confidence`는 0.05, `--max-gap`은 1.5초입니다. YOLO 입력 크기는 640, NMS IoU는 0.7입니다. 기본 `--device auto`는 CUDA 0을 우선 사용하고 CUDA가 없으면 CPU를 사용합니다. `--device cuda:0` 또는 `--device cpu`로 장치를 지정할 수 있습니다.
+| 설정 | Baseline (프로필 생략 또는 `--profile baseline`) | MVP v1 (`--profile mvp`) |
+| --- | --- | --- |
+| YOLO11n 가중치 | `outputs/yolo_baseline/20261119_yolo11n_640_b4_s42/weights/best.pt` | `outputs/yolo_multicountry/czech_japan_pilot_v1_yolo11n_640_b4_s42_e30/weights/best.pt` |
+| 입력 해상도 / 샘플링 간격 | 640 / 1초 | 1280 / 0.5초 |
+| 장치 | `auto` (CUDA 0 우선, CPU 대체) | `cuda:0` |
+| Confidence / NMS IoU / 최대 통합 간격 | 0.05 / 0.7 / 1.5초 | 0.05 / 0.7 / 1.5초 |
+
+MVP는 전체 JPG를 정사각 입력으로 변환하고 배치 1, FP32, 클래스별 NMS, `rect=False`, `max_det=300`을 사용합니다. ROI·Crop·타일링·추가 증강은 꺼져 있습니다. 지정된 혼합 가중치의 SHA-256과 클래스 순서 D00·D10·D20·D40을 검사합니다. `--model`, `--imgsz`, `--interval`, `--confidence`, `--max-gap`, `--device`를 직접 지정하면 해당 값이 프로필보다 우선합니다. 예를 들어 `--profile mvp --imgsz 960`은 혼합 모델 입력 크기를 960으로 바꿉니다.
 
 `--run-name`을 생략하면 UTC 시각으로 실행 이름을 만듭니다. 두 출력 위치 중 한 곳에 같은 이름이 있으면 실행을 중단합니다. 재실행에는 새 이름을 사용하며, 합성 영상을 다시 생성할 때는 새 MP4 경로를 지정합니다.
 
@@ -97,10 +105,12 @@ Windows x64의 독립 가상환경에서 CUDA 텐서 연산과 torchvision NMS�
 | --- | --- |
 | `data/processed/frames/<run_name>/` | 추출 원본 JPG와 `frames.csv` |
 | `outputs/video_analysis/<run_name>/detections.csv` | 박스별 원본 프레임 번호, 추정 시간, 클래스, confidence, 원본 픽셀 좌표와 프레임 JPG 절대 경로 |
-| `outputs/video_analysis/<run_name>/events.json` | AI 의심 구간 ID, 클래스, 시작·마지막 탐지 시각, 최고 confidence, 대표 프레임 시각과 JPG 상대 경로, 탐지 박스 수와 탐지 프레임 수 |
+| `outputs/video_analysis/<run_name>/events.json` | 구간 ID와 클래스, 시작·마지막 탐지 시각, 박스·프레임 수, 최고 confidence, 대표 프레임 번호·시각·원본 픽셀 좌표 `representative_xyxy`, 대표 JPG 상대 경로 |
 | `outputs/video_analysis/<run_name>/scenes/event_0001.jpg` | 구간에서 가장 높은 confidence를 기록한 박스, 클래스, confidence, 추정 시간을 표시한 대표 장면 |
-| `outputs/video_analysis/<run_name>/summary.json` | 입력 영상, 모델 경로와 SHA-256, 실제 실행 설정, OpenCV 전체 프레임 수와 추출 수, 탐지 수와 의심 구간 수, 분석 소요 시간 |
+| `outputs/video_analysis/<run_name>/summary.json` | 프로필, 모델 경로·해시, 적용 설정과 MVP 실측 텐서, 추출·추론·탐지 프레임 수, 클래스별 박스·구간 수, 감소 비율, 단계별 시간과 영상 길이 대비 분석 시간 |
 
 탐지가 0건이면 `detections.csv`에는 헤더만, `events.json`에는 빈 배열을 기록하고 `scenes/`는 빈 폴더로 생성합니다. 결과 저장이 끝나면 `summary.json`을 기록합니다. 분석 중 오류가 발생하면 이번 실행 폴더를 정리합니다.
 
-같은 클래스의 이웃 탐지 간격이 기준 이하면 하나의 AI 의심 구간에 들어갑니다. 시간상 가까운 별개의 균열이나 포트홀도 한 구간에 포함될 수 있습니다. 결과는 사용자가 원본 영상에서 확인할 후보입니다. Confidence 0.05와 통합 간격 1.5초는 탐색용 초기 설정입니다. 타임스탬프는 `frame_index / FPS` 추정값으로, 가변 FPS 영상에서는 재생 시각과 다를 수 있습니다. 실제 블랙박스 영상의 탐지 성능과 처리 시간은 별도 검증이 필요합니다.
+같은 클래스의 이웃 탐지 시각 차이가 1.5초 이하면 연속해서 한 구간에 들어갑니다. 검토자는 대표 시각을 기준으로 원본 전후 장면도 확인할 수 있습니다. 실제 전방 영상에서는 34초 동안 이어진 D00 박스 195개가 한 구간에 포함됐습니다. 구간 수는 사용자가 검토할 장면 수이며, 개별 파손 수와 일반화 성능은 확인되지 않았습니다. 샘플링·통합 간격은 잠정값이며 가변 FPS 영상의 `frame_index / FPS`는 실제 재생 시각과 다를 수 있습니다. [검토 이미지와 측정 결과](docs/experiments/part5_mvp_video_pipeline.md)
+
+Part 6.1의 분석 작업에서는 `src`를 Python 모듈 경로에 둔 뒤 `road_anomaly.video_analysis.analyze_video(Path(mp4_path), profile="mvp", run_name=job_id)`를 호출합니다. 함수는 결과 저장을 마친 뒤 `summary.json`과 같은 딕셔너리를 반환합니다. `output_dir`를 기준으로 `events.json`을 읽고 각 항목의 `representative_image`를 결합하면 대표 장면을 찾을 수 있습니다. [반환값과 오류 처리](docs/experiments/part5_mvp_video_pipeline.md#part-61-호출-규약)

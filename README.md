@@ -37,7 +37,7 @@ MP4 입력 → 프레임 추출 → YOLO 추론 → 클래스별 시간 기준 �
 
 ## 현재 구현 상태
 
-Windows x64의 프로젝트 가상환경에서 CUDA와 torchvision NMS를 검증하고, RDD2022 Czech 데이터 변환과 YOLO11n Baseline 학습·Validation 평가를 완료했습니다. MP4 분석 CLI와 Python 함수는 Czech Baseline과 Czech + Japan 혼합 모델을 지원합니다. 혼합 모델의 MVP 프로필로 실제 전·후방 영상 두 편에서 0.5초마다 추출한 141장 모두를 추론하고 대표 장면 22개를 원본 프레임과 대조했습니다. FastAPI 업로드·상태 조회와 React 결과 화면은 Part 6 구현 예정입니다. [Baseline 학습](docs/experiments/yolo11n_baseline.md) · [실제 MP4 검증](docs/experiments/part5_mvp_video_pipeline.md)
+Windows x64의 프로젝트 가상환경에서 CUDA와 torchvision NMS를 검증하고, RDD2022 Czech 데이터 변환과 YOLO11n Baseline 학습·Validation 평가를 완료했습니다. MP4 분석 CLI와 Python 함수는 Czech Baseline과 Czech + Japan 혼합 모델을 지원합니다. 혼합 모델의 MVP 프로필로 실제 전·후방 영상 두 편에서 0.5초마다 추출한 141장 모두를 추론하고 대표 장면 22개를 원본 프레임과 대조했습니다. Part 6.1에서는 FastAPI 업로드·상태·결과·영상·대표 이미지 API를 구현하고 실제 전방 MP4의 CUDA 분석을 검증했습니다. React 화면과 웹 통합은 Part 6.2~6.3에서 구현합니다. [실제 MP4 검증](docs/experiments/part5_mvp_video_pipeline.md) · [백엔드 검증](docs/experiments/part6_fastapi_backend.md)
 
 | 경로 | 용도 |
 | --- | --- |
@@ -113,4 +113,62 @@ MVP는 전체 JPG를 정사각 입력으로 변환하고 배치 1, FP32, 클래�
 
 같은 클래스의 이웃 탐지 시각 차이가 1.5초 이하면 연속해서 한 구간에 들어갑니다. 검토자는 대표 시각을 기준으로 원본 전후 장면도 확인할 수 있습니다. 실제 전방 영상에서는 34초 동안 이어진 D00 박스 195개가 한 구간에 포함됐습니다. 구간 수는 사용자가 검토할 장면 수이며, 개별 파손 수와 일반화 성능은 확인되지 않았습니다. 샘플링·통합 간격은 잠정값이며 가변 FPS 영상의 `frame_index / FPS`는 실제 재생 시각과 다를 수 있습니다. [검토 이미지와 측정 결과](docs/experiments/part5_mvp_video_pipeline.md)
 
-Part 6.1의 분석 작업에서는 `src`를 Python 모듈 경로에 둔 뒤 `road_anomaly.video_analysis.analyze_video(Path(mp4_path), profile="mvp", run_name=job_id)`를 호출합니다. 함수는 결과 저장을 마친 뒤 `summary.json`과 같은 딕셔너리를 반환합니다. `output_dir`를 기준으로 `events.json`을 읽고 각 항목의 `representative_image`를 결합하면 대표 장면을 찾을 수 있습니다. [반환값과 오류 처리](docs/experiments/part5_mvp_video_pipeline.md#part-61-호출-규약)
+Python 분석 함수는 `road_anomaly.video_analysis.analyze_video(Path(mp4_path), profile="mvp", run_name=job_id)` 형태로 호출하고 결과 저장 후 `summary.json`과 같은 딕셔너리를 반환합니다. 웹 워커는 여기에 `max_event_duration=5`와 전용 `frames_root`, `analysis_root`를 명시합니다. `output_dir`의 `events.json`과 `representative_image`로 대표 장면을 찾을 수 있습니다. [기존 반환값과 오류 처리](docs/experiments/part5_mvp_video_pipeline.md#part-61-호출-규약)
+
+## FastAPI 로컬 백엔드
+
+기존 AI 의존성을 설치한 프로젝트 `.venv`에서 웹 의존성만 추가합니다. 프로젝트 루트의 PowerShell에서 실행하며 서버는 localhost, 프로세스 1개로 운영합니다.
+
+```powershell
+.\.venv\Scripts\python.exe -B -X utf8 -m pip install -r requirements-web.txt
+.\.venv\Scripts\python.exe -B -X utf8 -m pip check
+.\.venv\Scripts\python.exe -B -X utf8 -m uvicorn road_anomaly.api.main:app --app-dir src --host 127.0.0.1 --port 8000 --workers 1
+```
+
+Swagger UI: <http://127.0.0.1:8000/docs> · OpenAPI: <http://127.0.0.1:8000/openapi.json>. [API 규약과 응답 예시](docs/api_contract.md) · [설치 버전](docs/ENVIRONMENT.md#part-61-웹-의존성-추가)
+
+MVP 가중치는 Git에 포함하지 않습니다. 학습 결과의 `outputs/yolo_multicountry/czech_japan_pilot_v1_yolo11n_640_b4_s42_e30/weights/best.pt`를 준비하고 아래 해시를 확인합니다. 다른 모델을 사용할 때에는 별도 검증과 프로필 변경이 필요하며 API 요청으로 모델을 바꿀 수 없습니다. [학습 과정](docs/experiments/part5_multicountry_model_training.md)
+
+```powershell
+Get-FileHash -Algorithm SHA256 'outputs/yolo_multicountry/czech_japan_pilot_v1_yolo11n_640_b4_s42_e30/weights/best.pt'
+# 3d770f1515ef2baf2fbe25d4c9ba241d289254b2002894d7cc02ff56009b2afb
+```
+
+새 PowerShell에서 요청합니다. `curl.exe`를 명시하면 Windows PowerShell의 `curl` 별칭과 충돌하지 않습니다. 성공한 업로드 응답은 HTTP 202와 `status: queued`이며 전체 모델 분석은 별도 워커에서 실행됩니다.
+
+```powershell
+$api = 'http://127.0.0.1:8000'
+Invoke-RestMethod "$api/api/health"
+$job = curl.exe --silent --show-error --fail -F 'file=@data/raw/dashcam_validation/Dashcam-Front.mp4' "$api/api/jobs" | ConvertFrom-Json
+$jobId = $job.job_id
+Invoke-RestMethod "$api/api/jobs/$jobId"
+
+# status가 completed가 된 뒤 결과 조회
+$result = Invoke-RestMethod "$api/api/jobs/$jobId/results"
+$result | Select-Object job_id, status, extracted_frame_count, detection_count, event_count, analysis_seconds
+$result.events | Select-Object event_id, class_name, representative_time_sec, image_url
+curl.exe --silent --head "$api/api/jobs/$jobId/video"
+curl.exe --silent --range 0-1023 --dump-header - --output NUL "$api/api/jobs/$jobId/video"
+```
+
+실제 전방 영상 전체 흐름을 자동으로 검증하려면 서버 실행 후 아래 명령을 사용합니다. 새 작업을 만들어 GPU 추론을 실제 수행하므로 기존 검증 JSON과 다른 출력 이름을 사용합니다.
+
+```powershell
+.\.venv\Scripts\python.exe -B -X utf8 scripts/verify_fastapi_backend.py --output outputs/fastapi_validation/manual_01/integration.json
+.\.venv\Scripts\python.exe -B -X utf8 -m unittest discover -s tests
+```
+
+| 작업별 저장 경로 | 내용 |
+| --- | --- |
+| `data/raw/uploads/<job_id>/input.mp4` | 업로드한 영상 사본 |
+| `outputs/jobs/<job_id>/job.json`, `results.json` | 원자적으로 저장하는 상태와 프론트엔드용 결과 |
+| `data/processed/frames/jobs/<job_id>/` | 샘플링 프레임과 CSV |
+| `outputs/video_analysis/jobs/<job_id>/` | 기존 형식의 summary·detections·events·scenes |
+
+웹 작업은 같은 클래스의 인접 간격 1.5초 조건에 최대 구간 길이 5초를 추가합니다. CLI 기본값에는 길이 제한이 없습니다. Python 함수의 선택 인자 `max_event_duration`, `frames_root`, `analysis_root`로 웹 작업의 제한과 전용 출력 위치를 전달합니다. 대표 장면은 구간 내 최고 confidence 박스가 있는 프레임이며 confidence는 모델 점수입니다. 구간 수는 실제 파손 수가 아닙니다.
+
+업로드 기본 제한은 200MiB입니다. `api/jobs.py`의 `ApiSettings`와 `create_app(settings)`로 크기·청크·구간 길이를 설정할 수 있고 환경 파일은 사용하지 않습니다. 전체 디코딩 검증은 202 반환 전에 수행하므로 업로드 응답에는 검증 시간이 포함됩니다. 표준 `ftyp` 헤더가 선두에 있는 MP4를 받고, OpenCV가 보고한 프레임 수와 전체 디코딩 수가 다르면 거절합니다. 재인코딩은 제공하지 않아 OpenCV 지원과 브라우저 코덱 지원은 별개입니다.
+
+단일 큐의 동기 분석을 별도 스레드 1개가 수행하며 같은 저장소의 중복 API 프로세스는 잠금으로 차단합니다. 상태는 `queued → running → completed/failed`이고 가짜 진행률을 제공하지 않습니다. 재시작 시 완료 결과는 유지하고 남아 있던 queued/running은 failed(`interrupted`)로 바꿉니다. 정상 종료는 현재 추론을 기다리며 대기 작업은 중단 처리합니다. 자동 재실행·취소·파일 보존 기간·삭제 API는 이번 범위에 없습니다.
+
+CORS는 `http://localhost:5173`, `http://127.0.0.1:5173`만 허용합니다. 인증이 없는 로컬 단일 사용자 MVP이며 외부 인터넷에 공개하지 않습니다. 임시 Ultralytics·Matplotlib 설정과 오프라인·자동 설치 금지를 유지합니다. React UI와 브라우저 재생·타임스탬프 이동은 Part 6.2~6.3에서 별도로 검증합니다.

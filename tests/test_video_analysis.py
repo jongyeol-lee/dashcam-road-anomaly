@@ -142,6 +142,18 @@ class VideoAnalysisTest(unittest.TestCase):
         with (output_dir / "detections.csv").open(encoding="utf-8", newline="") as handle:
             self.assertEqual(list(csv.reader(handle)), [list(video_analysis.DETECTION_COLUMNS)])
 
+    def test_explicit_duration_and_output_roots_do_not_change_cli_defaults(self):
+        self.predictions = {index: [(0, (10, 52, 72, 80), 0.5)] for index in (0, 10, 20)}
+        frames_root, analysis_root = self.root / "web_frames", self.root / "web_analysis"
+        summary = self.analyze(max_event_duration=1, frames_root=frames_root, analysis_root=analysis_root)
+        self.assertEqual(summary["event_count"], 2)
+        self.assertEqual(summary["detection_count"], 3)
+        self.assertEqual(summary["settings"]["max_event_duration_sec"], 1)
+        self.assertEqual(Path(summary["output_dir"]), analysis_root / "mock")
+        self.assertEqual(Path(summary["frames_dir"]), frames_root / "mock")
+        self.assertFalse(self.frames_root.exists())
+        self.assertFalse(self.analysis_root.exists())
+
     def test_rejects_invalid_inputs_before_creating_outputs(self) -> None:
         cases = [
             ({"imgsz": 0}, ValueError, "imgsz"),

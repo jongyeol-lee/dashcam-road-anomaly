@@ -1,0 +1,8 @@
+# Python 3.14 / local FastAPI MVP. Install after requirements.txt.
+fastapi==0.165.0
+uvicorn==0.54.0
+python-multipart==0.0.34
+httpx==0.28.1
+# Pin the validated response/serialization layer as well.
+starlette==1.10.0
+pydantic==2.14.4

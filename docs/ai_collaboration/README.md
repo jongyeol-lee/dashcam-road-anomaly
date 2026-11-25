@@ -11,6 +11,7 @@
 | [05. 실제 영상 모델·ROI B 비교](05_dashcam_model_roi_evaluation.md) | 고정 ROI가 정상 배경 오탐과 D20 정탐을 얼마나 제거하는가 | 두 모델 CUDA 평가 완료, 모델·ROI 채택 검토 대기 |
 | [06. 혼합 모델 입력 해상도](06_dashcam_resolution.md) | 해상도를 높이면 기존 미탐과 검토량은 어떻게 변하는가 | 세 해상도 측정 완료, MVP 후보 제안 |
 | [07. MVP 설정과 MP4 분석](07_mvp_video_pipeline.md) | 기존 CLI를 유지하면서 실제 영상을 몇 개의 검토 구간으로 제시할 것인가 | 두 영상 141장 추론, 대표 장면 22개와 원본 대조 완료 |
+| [08. FastAPI 백엔드](08_fastapi_backend.md) | 긴 통합 구간을 나누면서 기존 분석을 비동기 작업 API로 제공할 수 있는가 | 5초 제한 비교, 실제 CUDA HTTP 분석, 전체 테스트 151개 완료 |
 
 ## 프롬프트 원문과 후속 지시
 
@@ -29,6 +30,7 @@
 | Part 5.3-3 | [실제 블랙박스 GT로 모델·ROI 비교](prompts/part5_3_3_dashcam_model_roi_evaluation.md) | GT v1의 승인 범위에서 두 모델과 ROI 적용 전후를 같은 저장 예측으로 비교하도록 지정했습니다. |
 | Part 5.4 | [입력 해상도 비교](prompts/part5_4_dashcam_resolution.md) | 혼합 가중치와 GT를 고정하고 정탐 유지, 오탐, 시간과 메모리를 비교하도록 지정했습니다. |
 | Part 5.5 | [MVP 설정과 실제 MP4 분석 연결](prompts/part5_5_mvp_video_pipeline.md) | 잠정 프로필을 지정하고 전·후방 영상의 추론·시간 통합·대표 장면·처리 시간을 검증하도록 요청했습니다. |
+| Part 6.1 | [FastAPI 백엔드 구현](prompts/part6_1_fastapi_backend.md) | 웹에서만 5초 제한을 적용하고 단일 워커·파일 저장·미디어 API·실제 CUDA HTTP 검증을 요청했습니다. |
 
 각 행은 다른 시점에 전달된 요청입니다. 같은 프롬프트의 발송 전·후 편집본은 확보되지 않았습니다. 데이터 검사와 개선 실험 초기에 사용한 요청도 상세 실험 설계만 확인할 수 있습니다. 원문을 확보한 단계에만 원문 파일을 두었습니다.
 

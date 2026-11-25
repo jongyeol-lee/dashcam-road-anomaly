@@ -57,3 +57,21 @@ class DetectionGroupingTest(unittest.TestCase):
         for gap in (-1.0, float("inf"), float("nan")):
             with self.subTest(gap=gap), self.assertRaisesRegex(ValueError, "통합 간격"):
                 group_detections([], max_gap=gap)
+
+    def test_duration_limit_preserves_boxes_and_keeps_same_frame_together(self):
+        items = [detection(index, index / 2, confidence=0.5 + index / 100) for index in range(25)]
+        items.insert(12, detection(11, 5.5, confidence=0.99))
+        self.assertEqual(len(group_detections(items)), 1)
+        events = group_detections(reversed(items), max_event_duration=5)
+        self.assertEqual([(event.start_time_sec, event.last_detection_time_sec) for event in events],
+                         [(0, 5), (5.5, 10.5), (11, 12)])
+        self.assertEqual(sum(event.detection_count for event in events), len(items))
+        self.assertEqual(sum(event.detected_frame_count for event in events), 25)
+        self.assertEqual(events[1].representative.confidence, 0.99)
+        self.assertEqual(events[1].detection_count, 12)
+
+    def test_duration_decimal_boundary_and_invalid_limits(self):
+        self.assertEqual(len(group_detections([detection(7, 0.7), detection(8, 0.8)], max_event_duration=0.1)), 1)
+        for duration in (0, -1, float("inf"), float("nan")):
+            with self.subTest(duration=duration), self.assertRaisesRegex(ValueError, "최대 구간 길이"):
+                group_detections([], max_event_duration=duration)

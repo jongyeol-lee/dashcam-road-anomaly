@@ -1,0 +1,305 @@
+import csv
+import json
+import logging
+import os
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+from queue import Queue
+from tempfile import NamedTemporaryFile
+from threading import Event, RLock, Thread
+from uuid import UUID
+
+import cv2
+import numpy as np
+from pydantic import ValidationError
+
+from ..rdd2022 import CLASSES
+from ..video import open_video_capture
+from ..video_analysis import MVP_SHA256, PROJECT_ROOT, analyze_video
+from .schemas import AnalysisResults, ApiError, JobStatus, Scene, VideoInfo
+
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ApiSettings:
+    project_root: Path = PROJECT_ROOT
+    max_upload_bytes: int = 200 * 1024 * 1024
+    upload_chunk_bytes: int = 1024 * 1024
+    max_event_duration: float = 5.0
+    cors_origins: tuple[str, ...] = ("http://localhost:5173", "http://127.0.0.1:5173")
+
+    def __post_init__(self):
+        from ..detection_grouping import validate_max_event_duration
+
+        if self.max_upload_bytes <= 0 or self.upload_chunk_bytes <= 0:
+            raise ValueError("업로드 크기와 청크 크기는 양수여야 합니다.")
+        validate_max_event_duration(self.max_event_duration)
+
+    @property
+    def uploads_root(self) -> Path:
+        return self.project_root / "data/raw/uploads"
+
+    @property
+    def jobs_root(self) -> Path:
+        return self.project_root / "outputs/jobs"
+
+    @property
+    def analysis_root(self) -> Path:
+        return self.project_root / "outputs/video_analysis/jobs"
+
+    @property
+    def frames_root(self) -> Path:
+        return self.project_root / "data/processed/frames/jobs"
+
+
+class JobError(Exception):
+    def __init__(self, status_code: int, code: str, message: str):
+        super().__init__(message)
+        self.status_code = status_code
+        self.error = ApiError(code=code, message=message)
+
+
+def contained_path(root: Path, *parts: str) -> Path:
+    """사용자 입력뿐 아니라 심볼릭 링크로 작업 폴더를 벗어나는 접근도 막는다."""
+    root = root.resolve()
+    expected = root.joinpath(*parts)
+    path = expected.resolve()
+    if path != expected or not path.is_relative_to(root) or path == root:
+        raise JobError(404, "not_found", "파일 또는 작업을 찾을 수 없습니다.")
+    return path
+
+
+def write_json_atomic(path: Path, data: dict) -> None:
+    """같은 파일시스템의 임시 파일을 교체해 독자가 미완성 JSON을 읽지 않게 한다."""
+    temporary = None
+    try:
+        with NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, suffix=".tmp", delete=False) as handle:
+            temporary = Path(handle.name)
+            json.dump(data, handle, ensure_ascii=False, indent=2, allow_nan=False)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.replace(path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def validate_upload(path: Path) -> None:
+    """표준 MP4 컨테이너와 전체 프레임 디코딩을 검사한다. 모델 추론은 하지 않는다."""
+    try:
+        with path.open("rb") as handle:
+            header = handle.read(12)
+        if len(header) < 12 or header[4:8] != b"ftyp" or header[8:12] == b"qt  ":
+            raise ValueError("MP4 container required")
+        with open_video_capture(path) as (capture, metadata):
+            if metadata.width <= 0 or metadata.height <= 0:
+                raise ValueError("Invalid dimensions")
+            decoded_count = 0
+            while True:
+                decoded, frame = capture.read()
+                if not decoded:
+                    break
+                if frame is None or frame.size == 0:
+                    raise ValueError("Empty decoded frame")
+                decoded_count += 1
+            if decoded_count == 0 or (metadata.frame_count > 0 and decoded_count != metadata.frame_count):
+                raise ValueError("Incomplete video decoding")
+    except (OSError, RuntimeError, ValueError, cv2.error) as error:
+        raise JobError(422, "invalid_video", "MP4 영상을 정상적으로 디코딩할 수 없습니다.") from error
+
+
+class JobManager:
+    """파일 저장소와 단일 GPU 워커를 관리한다. 같은 저장소의 중복 서버는 잠금으로 막는다."""
+
+    def __init__(self, settings: ApiSettings, analyzer: Callable = analyze_video):
+        self.settings = settings
+        self.analyzer = analyzer
+        self._lock = RLock()
+        self._queue = Queue()
+        self._stopping = Event()
+        self._thread = None
+        self._process_lock = None
+
+    def start(self) -> None:
+        self.settings.jobs_root.mkdir(parents=True, exist_ok=True)
+        handle = (self.settings.jobs_root / ".worker.lock").open("a+b")
+        try:
+            if handle.tell() == 0:
+                handle.write(b"0")
+                handle.flush()
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            handle.close()
+            raise RuntimeError("이 작업 저장소를 사용하는 API 워커가 이미 실행 중입니다.") from error
+        self._process_lock = handle
+        try:
+            self._recover_interrupted()
+            self._thread = Thread(target=self._work, name="road-anomaly-gpu", daemon=True)
+            self._thread.start()
+        except BaseException:
+            self._release_process_lock()
+            raise
+
+    def _release_process_lock(self) -> None:
+        if self._process_lock is not None:
+            self._process_lock.close()
+            self._process_lock = None
+
+    def stop(self) -> None:
+        # 등록과 종료 신호를 같은 잠금으로 묶어 sentinel 뒤에 새 작업이 들어가지 않게 한다.
+        with self._lock:
+            self._stopping.set()
+            self._queue.put(None)
+        if self._thread is not None:
+            # 이미 실행 중인 동기 추론이 끝난 뒤 설정과 잠금을 해제한다.
+            self._thread.join()
+        self._release_process_lock()
+
+    def _job_path(self, job_id: UUID) -> Path:
+        return contained_path(self.settings.jobs_root, str(job_id), "job.json")
+
+    def get(self, job_id: UUID) -> JobStatus:
+        with self._lock:
+            path = self._job_path(job_id)
+            if not path.is_file():
+                raise JobError(404, "not_found", "작업을 찾을 수 없습니다.")
+            return JobStatus.model_validate_json(path.read_text(encoding="utf-8"))
+
+    def submit(self, job_id: UUID) -> JobStatus:
+        with self._lock:
+            if self._stopping.is_set():
+                raise JobError(503, "shutting_down", "서버가 종료 중입니다.")
+            job = JobStatus(job_id=job_id, status="queued", created_at=datetime.now(UTC))
+            path = self._job_path(job_id)
+            path.parent.mkdir(parents=True)
+            write_json_atomic(path, job.model_dump(mode="json"))
+            self._queue.put(job_id)
+            return job
+
+    def _update(self, job_id: UUID, **changes) -> None:
+        with self._lock:
+            job = self.get(job_id).model_copy(update=changes)
+            write_json_atomic(self._job_path(job_id), job.model_dump(mode="json"))
+
+    def _recover_interrupted(self) -> None:
+        for directory in self.settings.jobs_root.iterdir():
+            if not directory.is_dir():
+                continue
+            try:
+                job_id = UUID(directory.name)
+                job = self.get(job_id)
+            except (ValueError, OSError, ValidationError, JobError):
+                logger.warning("읽을 수 없는 작업 메타데이터를 건너뜁니다.")
+                continue
+            if job.status in ("queued", "running"):
+                self._update(job_id, status="failed", finished_at=datetime.now(UTC),
+                             error=ApiError(code="interrupted", message="서버 종료로 작업이 중단됐습니다. 새로 업로드해 주세요."))
+
+    def _work(self) -> None:
+        while (job_id := self._queue.get()) is not None:
+            try:
+                if self._stopping.is_set():
+                    self._update(job_id, status="failed", finished_at=datetime.now(UTC),
+                                 error=ApiError(code="interrupted", message="서버 종료로 대기 작업이 중단됐습니다."))
+                    continue
+                self._update(job_id, status="running", started_at=datetime.now(UTC))
+                self.analyzer(
+                    self.video_path(job_id), profile="mvp", run_name=str(job_id),
+                    max_event_duration=self.settings.max_event_duration,
+                    frames_root=self.settings.frames_root, analysis_root=self.settings.analysis_root,
+                )
+                # 반환값만 신뢰하지 않고 디스크의 요약·탐지·구간·JPEG를 확인한다.
+                results = self._load_results(job_id, verify_files=True)
+                write_json_atomic(self._results_path(job_id), results.model_dump(mode="json"))
+                self._update(job_id, status="completed", finished_at=datetime.now(UTC))
+            except Exception:
+                # 상세 traceback은 로컬 서버 로그에만 남긴다. API에는 경로나 모델 오류를 노출하지 않는다.
+                logger.exception("분석 작업 실패: %s", job_id)
+                try:
+                    self._update(job_id, status="failed", finished_at=datetime.now(UTC),
+                                 error=ApiError(code="analysis_failed", message="영상 분석에 실패했습니다. 서버 로그를 확인해 주세요."))
+                except Exception:
+                    logger.exception("작업 실패 상태 저장 실패: %s", job_id)
+            finally:
+                self._queue.task_done()
+
+    def video_path(self, job_id: UUID) -> Path:
+        return contained_path(self.settings.uploads_root, str(job_id), "input.mp4")
+
+    def _results_path(self, job_id: UUID) -> Path:
+        return contained_path(self.settings.jobs_root, str(job_id), "results.json")
+
+    def results(self, job_id: UUID) -> AnalysisResults:
+        if self.get(job_id).status != "completed":
+            raise JobError(409, "results_not_ready", "완료된 작업의 결과만 조회할 수 있습니다.")
+        return AnalysisResults.model_validate_json(self._results_path(job_id).read_text(encoding="utf-8"))
+
+    def scene_path(self, job_id: UUID, event_id: str) -> Path:
+        results = self.results(job_id)
+        if not any(event.event_id == event_id for event in results.events):
+            raise JobError(404, "not_found", "대표 이미지를 찾을 수 없습니다.")
+        # JSON에 있는 임의 경로를 제공하지 않고 검증한 ID로 경로를 구성한다.
+        return contained_path(self.settings.analysis_root, str(job_id), "scenes", f"{event_id}.jpg")
+
+    def _load_results(self, job_id: UUID, *, verify_files: bool) -> AnalysisResults:
+        directory = contained_path(self.settings.analysis_root, str(job_id))
+        summary = json.loads(contained_path(directory, "summary.json").read_text(encoding="utf-8"))
+        events = json.loads(contained_path(directory, "events.json").read_text(encoding="utf-8"))
+        public_events = []
+        for event in events:
+            scene = Scene(**{key: event[key] for key in Scene.model_fields if key != "image_url"},
+                          image_url=f"/api/jobs/{job_id}/scenes/{event['event_id']}")
+            if (scene.class_name != CLASSES[scene.class_id]
+                    or not scene.start_time_sec <= scene.representative_time_sec <= scene.last_detection_time_sec
+                    or scene.last_detection_time_sec - scene.start_time_sec > self.settings.max_event_duration + 1e-9
+                    or scene.detected_frame_count > scene.detection_count
+                    or event["representative_image"] != f"scenes/{scene.event_id}.jpg"):
+                raise ValueError("Invalid event metadata")
+            if verify_files:
+                path = contained_path(directory, "scenes", f"{scene.event_id}.jpg")
+                image = cv2.imdecode(np.frombuffer(path.read_bytes(), dtype=np.uint8), cv2.IMREAD_COLOR)
+                if image is None:
+                    raise ValueError("Invalid scene JPEG")
+            public_events.append(scene)
+        video = summary["video"]
+        # 클라이언트용 설정에는 경로를 담을 수 있는 임의 키를 전달하지 않는다.
+        setting_keys = ("interval_sec", "max_gap_sec", "max_event_duration_sec", "imgsz", "iou", "rect", "max_det",
+                        "batch", "quantize", "classes", "agnostic_nms", "augment", "tile", "nms", "conf", "device")
+        settings = {key: summary["settings"][key] for key in setting_keys}
+        results = AnalysisResults(
+            job_id=job_id, video=VideoInfo(**{key: video[key] for key in ("fps", "width", "height", "frame_count")},
+                                         duration_sec=summary["video_duration_sec"]),
+            video_url=f"/api/jobs/{job_id}/video", extracted_frame_count=video["extracted_frame_count"],
+            inferred_frame_count=summary["inferred_frame_count"], detected_frame_count=summary["detected_frame_count"],
+            detection_count=summary["detection_count"], event_count=summary["event_count"],
+            analysis_seconds=summary["analysis_seconds"], profile=summary["profile"], model_sha256=summary["model"]["sha256"],
+            settings=settings, timestamp_basis=summary["timestamp_basis"], events=public_events,
+        )
+        if (summary["run_name"] != str(job_id) or results.model_sha256 != MVP_SHA256
+                or results.event_count != len(events)
+                or len({event.event_id for event in public_events}) != len(events)
+                or results.detection_count != sum(event.detection_count for event in public_events)
+                or results.extracted_frame_count != results.inferred_frame_count
+                or results.detected_frame_count > results.inferred_frame_count
+                or settings["max_event_duration_sec"] != self.settings.max_event_duration):
+            raise ValueError("Inconsistent analysis results")
+        if verify_files:
+            with contained_path(directory, "detections.csv").open(encoding="utf-8", newline="") as handle:
+                reader = csv.DictReader(handle)
+                if not reader.fieldnames or "frame_index" not in reader.fieldnames:
+                    raise ValueError("Invalid detections CSV")
+                rows = list(reader)
+            if len(rows) != results.detection_count or len({row["frame_index"] for row in rows}) != results.detected_frame_count:
+                raise ValueError("Incomplete detections CSV")
+        return results

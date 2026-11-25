@@ -14,7 +14,9 @@ from time import perf_counter
 import cv2
 import numpy as np
 
-from .detection_grouping import DEFAULT_MAX_GAP, FrameDetection, group_detections, validate_max_gap
+from .detection_grouping import (
+    DEFAULT_MAX_GAP, FrameDetection, group_detections, validate_max_event_duration, validate_max_gap,
+)
 from .rdd2022 import CLASSES
 from .video import DEFAULT_FRAMES_ROOT, ExtractionResult, extract_frames
 
@@ -160,10 +162,13 @@ def _save_scene(path: Path, detection: FrameDetection) -> None:
         handle.write(jpeg.tobytes())
 
 
-def _save_events(directory: Path, detections: list[FrameDetection], max_gap: float) -> list[dict]:
+def _save_events(
+    directory: Path, detections: list[FrameDetection], max_gap: float,
+    max_event_duration: float | None = None,
+) -> list[dict]:
     (directory / "scenes").mkdir()
     entries = []
-    for index, event in enumerate(group_detections(detections, max_gap), start=1):
+    for index, event in enumerate(group_detections(detections, max_gap, max_event_duration=max_event_duration), start=1):
         event_id = f"event_{index:04d}"
         scene_path = Path("scenes") / f"{event_id}.jpg"
         representative = event.representative
@@ -203,6 +208,9 @@ def analyze_video(
     max_gap: float | None = None,
     device: str | None = None,
     imgsz: int | None = None,
+    max_event_duration: float | None = None,
+    frames_root: Path | None = None,
+    analysis_root: Path | None = None,
 ) -> dict:
     """MP4를 샘플링해 YOLO 탐지와 의심 구간을 저장하고 실행 요약을 반환한다."""
     if profile not in PROFILES:
@@ -225,6 +233,7 @@ def analyze_video(
     if not 0 <= confidence <= 1:
         raise ValueError("Confidence는 0~1이어야 합니다.")
     validate_max_gap(max_gap)
+    validate_max_event_duration(max_event_duration)
     if device not in DEVICES:
         raise ValueError(f"추론 장치는 {', '.join(DEVICES)} 중 하나여야 합니다.")
     if video_path.suffix.lower() != ".mp4":
@@ -237,8 +246,8 @@ def analyze_video(
         raise FileNotFoundError(f"YOLO 모델 파일을 찾을 수 없습니다. {model_path}")
     video_path, model_path = video_path.resolve(), model_path.resolve()
 
-    frames_dir = DEFAULT_FRAMES_ROOT.resolve() / run_name
-    output_dir = DEFAULT_ANALYSIS_ROOT.resolve() / run_name
+    frames_dir = (DEFAULT_FRAMES_ROOT if frames_root is None else frames_root).resolve() / run_name
+    output_dir = (DEFAULT_ANALYSIS_ROOT if analysis_root is None else analysis_root).resolve() / run_name
     for directory in (frames_dir, output_dir):
         if directory.exists(follow_symlinks=False):
             raise FileExistsError(f"이미 사용 중인 실행 이름입니다. {directory}")
@@ -275,7 +284,7 @@ def analyze_video(
         if observed is not None and observed["frames"] != frames.extracted_count:
             raise RuntimeError("실제 모델 입력 수와 추출 프레임 수가 일치하지 않습니다.")
         _save_detections(output_dir / "detections.csv", detections)
-        events = _save_events(output_dir, detections, max_gap)
+        events = _save_events(output_dir, detections, max_gap, max_event_duration)
         duration = frames.frame_count / frames.fps if frames.frame_count > 0 else None
         box_counts = Counter(item.class_name for item in detections)
         event_counts = Counter(event["class_name"] for event in events)
@@ -306,6 +315,9 @@ def analyze_video(
                                "prediction": predicted - initialized, "grouping_and_save": elapsed - (predicted - start)},
             "analysis_seconds": elapsed,
         }
+        # 과거 CLI의 기본 결과 형식을 유지하고 웹에서 명시한 제한만 기록한다.
+        if max_event_duration is not None:
+            summary["settings"]["max_event_duration_sec"] = max_event_duration
         # 대표 장면과 상세 결과가 모두 저장된 뒤 실행 요약을 기록한다.
         _write_json(output_dir / "summary.json", summary)
         cleanup.pop_all()

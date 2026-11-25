@@ -1,5 +1,7 @@
 # 개발환경 버전 관리
 
+최신 추가: [Part 6.1 웹 의존성](#part-61-웹-의존성-추가) · 2026-11-25. 아래 11월 19일의 AI 환경 구축 기록은 당시 결과로 유지합니다.
+
 확인일 **2026-11-19 (KST)** · 개발환경 구축 및 재구성 검증
 
 ## 기존 프로젝트에서 확인한 버전
@@ -150,3 +152,30 @@ finally:
     video.release()
 '@ | & $projectPython -I -B - $sampleMp4
 ```
+
+## Part 6.1 웹 의존성 추가
+
+**2026-11-25 (KST)** · 기존 `.venv`의 Python 3.14.5와 AI 패키지를 유지하고 로컬 백엔드·테스트에 필요한 웹 패키지만 추가했습니다. 설치 전 FastAPI·Uvicorn·python-multipart·Starlette·Pydantic은 미설치, httpx 0.28.1은 설치 상태였습니다. 프로젝트 Python 경로는 샌드박스에서 접근이 제한돼 권한을 확장한 실행으로 확인했습니다. 다른 Python이나 가상환경으로 교체하지 않았습니다.
+
+| 패키지 | 설치 목표 = 실제 버전 | 변경 |
+| --- | --- | --- |
+| fastapi | 0.165.0 | 신규, API·업로드 경로 본문 제한 |
+| uvicorn | 0.54.0 | 신규, localhost ASGI 서버 |
+| python-multipart | 0.0.34 | 신규, multipart 업로드 |
+| httpx | 0.28.1 | 기존 유지, API 테스트·실제 HTTP 검증 |
+| starlette | 1.10.0 | 신규, 요청·FileResponse Range 처리 |
+| pydantic | 2.14.4 | 신규, 응답·저장 결과 검증 |
+
+신규 하위 의존성은 `pydantic-core 2.50.5`, `annotated-types 0.8.0`, `typing-inspection 0.4.5`, `annotated-doc 0.0.7`, `click 8.5.1`, `opentelemetry-api 1.45.2`입니다. 원격 추적 exporter나 telemetry 전송 설정은 추가하지 않았습니다. 기존 anyio 4.16.0·typing-extensions 4.16.0·h11 0.16.0 등은 유지했습니다. 11개 신규 패키지만 설치됐고 기존 패키지 교체는 없었습니다. [설치 계획](../outputs/fastapi_validation/part61_v1/install_plan.json) · [실제 설치 보고서](../outputs/fastapi_validation/part61_v1/install_result.json)
+
+AI 패키지는 `torch 2.14.1+cu130`, `torchvision 0.29.1+cu130`, `ultralytics 8.4.215`, `opencv-python 5.0.0.93`, `numpy 2.5.4`로 기존과 같습니다. CUDA 빌드 13.0, `torch.cuda.is_available() == True`, RTX 3060 Ti에서 실제 텐서 연산과 MVP forward 69장 모두 `cuda:0`·FP32를 확인했습니다. 이번에 NVIDIA 드라이버 버전을 별도로 재조회하거나 변경하지 않았습니다.
+
+웹 의존성은 [requirements-web.txt](../requirements-web.txt)에 분리했습니다. 설치 전 `pip install --dry-run --only-binary=:all:`로 Python 3.14 지원 wheel을 확인했고 Pydantic Core는 `cp314-cp314-win_amd64`, 나머지 신규 패키지는 범용 Python wheel이 선택됐습니다. FastAPI와 Uvicorn 공식 릴리스 기록 및 설치된 구현을 확인해 사용했습니다. [FastAPI 릴리스](https://fastapi.tiangolo.com/release-notes/) · [FastAPI 요청 본문 제한](https://fastapi.tiangolo.com/advanced/request-body-limits/) · [Uvicorn 릴리스](https://uvicorn.dev/release-notes/) · [Starlette FileResponse](https://starlette.dev/responses/#fileresponse)
+
+```powershell
+.\.venv\Scripts\python.exe -B -X utf8 -m pip --isolated --disable-pip-version-check --no-cache-dir install --only-binary=:all: --index-url https://pypi.org/simple -r requirements-web.txt
+.\.venv\Scripts\python.exe -B -X utf8 -m pip check
+.\.venv\Scripts\python.exe -B -X utf8 -m unittest discover -s tests
+```
+
+`pip check`는 `No broken requirements found.`, 전체 테스트는 151개 통과입니다. 실제 MP4의 전체 디코딩과 69개 샘플 추론, HTTP Range·JPEG 조회도 성공했습니다. Starlette 1.10.0 TestClient는 기존 httpx 사용에 대해 httpx2 전환 예정 경고를 내지만 현재 테스트는 통과합니다. 경고를 숨기거나 불필요한 패키지를 추가하지 않았습니다. [실측 결과와 한계](experiments/part6_fastapi_backend.md)

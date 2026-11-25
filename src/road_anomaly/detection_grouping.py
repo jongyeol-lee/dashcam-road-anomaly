@@ -32,6 +32,11 @@ def validate_max_gap(max_gap: float) -> None:
         raise ValueError("통합 간격은 0 이상의 유한한 숫자(초)여야 합니다.")
 
 
+def validate_max_event_duration(max_event_duration: float | None) -> None:
+    if max_event_duration is not None and (not math.isfinite(max_event_duration) or max_event_duration <= 0):
+        raise ValueError("최대 구간 길이는 0보다 큰 유한한 숫자(초) 또는 None이어야 합니다.")
+
+
 def _summarize(detections: list[FrameDetection]) -> SuspiciousEvent:
     return SuspiciousEvent(
         start_time_sec=detections[0].estimated_time_sec,
@@ -44,9 +49,11 @@ def _summarize(detections: list[FrameDetection]) -> SuspiciousEvent:
 
 def group_detections(
     detections: Iterable[FrameDetection], max_gap: float = DEFAULT_MAX_GAP,
+    *, max_event_duration: float | None = None,
 ) -> list[SuspiciousEvent]:
-    """클래스별로 이웃 탐지 간격이 기준 이하인 탐지를 시간순 의심 구간으로 묶는다."""
+    """같은 클래스의 인접 탐지를 묶고, 지정된 경우 시작부터의 길이도 제한한다."""
     validate_max_gap(max_gap)
+    validate_max_event_duration(max_event_duration)
     ordered = sorted(detections, key=lambda item: (item.class_id, item.estimated_time_sec, item.frame_index))
     events, group = [], []
     rounding_steps = int(max_gap > 0)
@@ -55,7 +62,10 @@ def group_detections(
             previous = group[-1]
             # 소수 간격의 경계는 부동소수점 반올림 오차 한 단위까지 포함한다.
             limit = math.nextafter(previous.estimated_time_sec + max_gap, math.inf, steps=rounding_steps)
-            if detection.class_id != previous.class_id or detection.estimated_time_sec > limit:
+            duration_limit = (math.inf if max_event_duration is None else
+                              math.nextafter(group[0].estimated_time_sec + max_event_duration, math.inf))
+            if (detection.class_id != previous.class_id or detection.estimated_time_sec > limit
+                    or detection.estimated_time_sec > duration_limit):
                 events.append(_summarize(group))
                 group = []
         group.append(detection)

@@ -61,6 +61,43 @@ const fileInput = (page: Page) => page.locator('input[type=file]')
 const heading = (page: Page, name: string) => page.getByRole('heading', { name, exact: true })
 const button = (page: Page, name: string) => page.getByRole('button', { name, exact: true })
 const rows = (page: Page) => page.getByTestId('scene-row')
+const positionLabel = (page: Page) => page.getByRole('status', { name: '표시 장면 중 현재 위치' })
+const markers = (page: Page) => page.getByRole('group', { name: '의심 구간 위치' }).getByRole('button')
+const markerFor = (page: Page, id: string) => markers(page).and(page.locator(`[data-event-ids~="${id}"]`))
+const videoTime = (page: Page) => page.locator('video').evaluate((video: HTMLVideoElement) => video.currentTime)
+
+async function mockVideoMetadata(page: Page) {
+  // 미디어 메타데이터 도착 순서와 seek 요청만 제어한다. 실제 디코딩은 실영상 검증에서 확인한다.
+  await page.addInitScript(() => {
+    const times = new WeakMap<HTMLVideoElement, number>()
+    Object.defineProperties(HTMLVideoElement.prototype, {
+      readyState: { get(this: HTMLVideoElement) { return this.dataset.metadataLoaded ? 1 : 0 } },
+      duration: { get(this: HTMLVideoElement) { return this.dataset.metadataLoaded ? 20 : NaN } },
+      currentTime: {
+        get(this: HTMLVideoElement) { return times.get(this) ?? 0 },
+        set(this: HTMLVideoElement, seconds: number) { times.set(this, seconds) },
+      },
+    })
+    document.addEventListener('error', event => {
+      if (event.target instanceof HTMLVideoElement) event.stopImmediatePropagation()
+    }, true)
+  })
+}
+
+async function loadMockMetadata(page: Page) {
+  await page.locator('video').evaluate((video: HTMLVideoElement) => {
+    video.dataset.metadataLoaded = 'true'
+    video.dispatchEvent(new Event('durationchange'))
+    video.dispatchEvent(new Event('loadedmetadata'))
+  })
+}
+
+async function setMockVideoTime(page: Page, seconds: number) {
+  await page.locator('video').evaluate((video: HTMLVideoElement, time) => {
+    video.currentTime = time
+    video.dispatchEvent(new Event('timeupdate'))
+  }, seconds)
+}
 
 test.beforeEach(async ({ page }) => {
   // 처리되지 않은 API 요청도 실제 FastAPI 포트로 보내지 않는다.
@@ -79,12 +116,15 @@ test('파일 선택, 변경, 취소 및 브라우저 입력 검증', async ({ pa
   await button(page, 'MP4 파일 선택').click()
   await (await choose).setFiles(mp4('first.mp4'))
   await expect(page.getByText('first.mp4')).toBeVisible()
+  await expect(page.getByText('파일 선택됨 · 15 B')).toBeVisible()
+  await expect(page.getByText('MP4 · 최대 200 MiB')).toBeVisible()
   await expect(submit).toBeEnabled()
 
   const replace = page.waitForEvent('filechooser')
   await button(page, '파일 변경').click()
-  await (await replace).setFiles(mp4('second.MP4'))
+  await (await replace).setFiles(mp4('second.MP4', 'x'.repeat(1536)))
   await expect(page.getByText('second.MP4')).toBeVisible()
+  await expect(page.getByText('파일 선택됨 · 1.5 KiB')).toBeVisible()
   await expect(page.getByText('first.mp4')).toHaveCount(0)
   await button(page, '선택 취소').click()
   await expect(submit).toBeDisabled()
@@ -98,15 +138,19 @@ test('파일 선택, 변경, 취소 및 브라우저 입력 검증', async ({ pa
   await expect(submit).toBeDisabled()
 
   // 200 MiB를 할당하지 않고 File.size 경계와 실제 파일 선택 이벤트를 검증한다.
-  await fileInput(page).evaluate(input => {
+  const chooseSize = (size: number) => fileInput(page).evaluate((input, size) => {
     const fileField = input as HTMLInputElement
     const file = new File(['test'], 'large.mp4', { type: 'video/mp4' })
-    Object.defineProperty(file, 'size', { value: 209715201 })
+    Object.defineProperty(file, 'size', { value: size })
     const transfer = new DataTransfer()
     transfer.items.add(file)
     fileField.files = transfer.files
     fileField.dispatchEvent(new Event('change', { bubbles: true }))
-  })
+  }, size)
+  await chooseSize(209715200)
+  await expect(page.getByText('파일 선택됨 · 200 MiB')).toBeVisible()
+  await expect(submit).toBeEnabled()
+  await chooseSize(209715201)
   await expect(alert).toContainText('파일 크기가 200 MiB')
   await expect(submit).toBeDisabled()
   expect(posts).toBe(0)
@@ -243,6 +287,8 @@ for (const suffix of ['', '/results']) {
       } else {
         await expect(heading(page, '영상 분석이 완료되었습니다.')).toBeVisible()
       }
+      await expect(page.getByText('작업 ID · ' + otherJob, { exact: true })).toBeHidden()
+      await page.getByText('작업 정보', { exact: true }).click()
       await expect(page.getByText('작업 ID · ' + otherJob, { exact: true })).toBeVisible()
       pending.release()
       await expect(page.getByText('작업 ID · ' + job, { exact: true })).toHaveCount(0)
@@ -315,6 +361,8 @@ test('의심 구간이 없는 응답 표시', async ({ page }) => {
   await expect(heading(page, '의심 장면이 없습니다')).toBeVisible()
   await expect(page.getByTestId('review-count')).toHaveText('0 / 0')
   await expect(rows(page)).toHaveCount(0)
+  await expect(markers(page)).toHaveCount(0)
+  await expect(positionLabel(page)).toHaveCount(0)
 })
 
 test('대표 이미지 로딩 실패 후 다시 불러오기', async ({ page }) => {
@@ -331,4 +379,212 @@ test('대표 이미지 로딩 실패 후 다시 불러오기', async ({ page }) 
   const image = detail.getByRole('img', { name: '종방향 균열 대표 장면' })
   await expect.poll(() => image.evaluate(element => (element as HTMLImageElement).naturalWidth)).toBeGreaterThan(0)
   await expect(detail.getByText('대표 이미지를 불러오지 못했습니다.')).toHaveCount(0)
+})
+
+test('대표 이미지 확대 크기, 모달 오류 복구와 ESC 포커스 복원', async ({ page }) => {
+  await mockVideoMetadata(page)
+  await page.route(api + resultPath, route => json(route, results()))
+  await page.goto(resultPath)
+  await loadMockMetadata(page)
+  await setMockVideoTime(page, 6)
+  const expand = button(page, '이미지 확대')
+  await expand.focus()
+  await expand.press('Enter')
+  const modal = page.getByRole('dialog', { name: '대표 이미지 확대' })
+  const original = button(page, '원본 크기')
+  const fit = button(page, '화면에 맞춤')
+  const image = modal.getByRole('img')
+  await expect(button(page, '닫기')).toBeFocused()
+  await expect(fit).toHaveAttribute('aria-pressed', 'true')
+  await expect(modal.getByText('AI 예측 점수 0.30', { exact: false })).toBeVisible()
+  await expect.poll(() => image.evaluate(img => (img as HTMLImageElement).naturalWidth)).toBeGreaterThan(0)
+  expect(await image.getAttribute('src')).toBe(await page.locator('.detail-image > img').getAttribute('src'))
+  await expect(modal).toBeVisible()
+  expect(await page.evaluate(() => getComputedStyle(document.documentElement).overflow)).toBe('hidden')
+  const backgroundScroll = await page.evaluate(() => window.scrollY)
+  await page.mouse.move(2, 2)
+  await page.mouse.wheel(0, 600)
+  await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))))
+  expect(await page.evaluate(() => window.scrollY)).toBe(backgroundScroll)
+  await page.keyboard.press('Tab')
+  await expect(fit).toBeFocused()
+  await original.click()
+  await expect(original).toHaveAttribute('aria-pressed', 'true')
+  expect(await image.evaluate(element => {
+    const img = element as HTMLImageElement
+    return img.width === img.naturalWidth && img.height === img.naturalHeight
+  })).toBe(true)
+
+  // 실제 깨진 브라우저 이미지 응답을 확대본에만 주입한다.
+  await image.evaluate(element => { (element as HTMLImageElement).src = 'data:image/jpeg,broken' })
+  await expect(modal.getByText('대표 이미지를 불러오지 못했습니다.')).toBeVisible()
+  await modal.getByRole('button', { name: '이미지 다시 불러오기' }).click()
+  await expect.poll(() => image.evaluate(img => (img as HTMLImageElement).naturalWidth)).toBeGreaterThan(0)
+  await page.keyboard.press('Escape')
+  await expect(modal).toHaveCount(0)
+  await expect(expand).toBeFocused()
+  expect(await page.evaluate(() => window.scrollY)).toBe(backgroundScroll)
+  expect(await videoTime(page)).toBe(6)
+})
+
+const denseScenes = [scene(1, 'D00', 3, 0.3), scene(2, 'D00', 3, 0.8),
+  scene(3, 'D40', 3.5, 0.6), scene(4, 'D20', 5, 0.4), scene(5, 'D10', 16, 0.7)]
+
+test('밀집 마커의 같은 시각 장면을 키보드로 개별 선택하고 화면 크기에 따라 다시 묶는다', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1024 })
+  await mockVideoMetadata(page)
+  await page.route(api + resultPath, route => json(route, results(denseScenes)))
+  await page.goto(resultPath)
+  await loadMockMetadata(page)
+  await setMockVideoTime(page, 9)
+  const group = markerFor(page, 'event_0002')
+  const options = page.getByRole('group', { name: '모아 표시한 의심 장면' })
+  await expect(markers(page)).toHaveCount(3)
+  await expect(group).toHaveAttribute('aria-expanded', 'false')
+  await expect(group).toHaveAccessibleName(/3개.*선택한 장면 포함/)
+  await group.focus()
+  await group.press('Enter')
+  await expect(options.getByRole('button', { name: /event_0001/ })).toBeFocused()
+  await expect(options.getByRole('button', { name: /00:03\.5 · 포트홀/ })).toBeVisible()
+  expect(await videoTime(page)).toBe(9)
+  await page.keyboard.press('Escape')
+  await expect(group).toBeFocused()
+  await group.press('Enter')
+  await page.keyboard.press('Tab')
+  await expect(options.getByRole('button', { name: /event_0002/ })).toBeFocused()
+  await page.keyboard.press('Enter')
+  await expect(rows(page).nth(1)).toHaveAttribute('aria-pressed', 'true')
+  await expect.poll(() => videoTime(page)).toBe(3)
+  await expect(group).toBeFocused()
+  await group.press('Enter')
+  await options.getByRole('button', { name: /event_0001/ }).click()
+  await expect(rows(page).first()).toHaveAttribute('aria-pressed', 'true')
+  await page.setViewportSize({ width: 390, height: 844 })
+  await expect(markers(page)).toHaveCount(2)
+  await expect(group).toHaveAccessibleName(/4개/)
+  await page.getByLabel('탐지 종류').selectOption('D00')
+  await expect(markers(page)).toHaveCount(1)
+  await expect(group).toHaveAccessibleName(/2개/)
+  await expect(group).toHaveAttribute('data-event-ids', 'event_0001 event_0002')
+})
+
+test('이전·다음과 필터·정렬, 메타데이터 전 최신 seek 및 같은 장면 재선택', async ({ page }) => {
+  await mockVideoMetadata(page)
+  await page.route(api + resultPath, route => json(route, results()))
+  await page.goto(resultPath)
+  const previous = button(page, '이전 장면')
+  const next = button(page, '다음 장면')
+  await expect(previous).toBeDisabled()
+  await expect(positionLabel(page)).toHaveText('1 / 3')
+  await next.click()
+  await next.click()
+  await expect(positionLabel(page)).toHaveText('3 / 3')
+  await expect(next).toBeDisabled()
+  expect(await videoTime(page)).toBe(0)
+  await loadMockMetadata(page)
+  await expect.poll(() => videoTime(page)).toBe(12)
+  await expect(markerFor(page, 'event_0003')).toHaveAttribute('aria-pressed', 'true')
+  await expect(rows(page).last()).toHaveAttribute('aria-pressed', 'true')
+
+  await setMockVideoTime(page, 7)
+  await rows(page).last().click()
+  await expect.poll(() => videoTime(page)).toBe(12)
+  await setMockVideoTime(page, 7)
+  await page.getByLabel('정렬').selectOption('score')
+  await expect(positionLabel(page)).toHaveText('2 / 3')
+  expect(await videoTime(page)).toBe(7)
+  await next.click()
+  await expect(next).toBeDisabled()
+  await expect.poll(() => videoTime(page)).toBe(3)
+  await previous.click()
+  await expect.poll(() => videoTime(page)).toBe(12)
+  await setMockVideoTime(page, 7)
+  await page.getByLabel('탐지 종류').selectOption('D40')
+  await expect(positionLabel(page)).toHaveText('1 / 1')
+  await expect(previous).toBeDisabled()
+  await expect(next).toBeDisabled()
+  await expect(markers(page)).toHaveCount(1)
+  await expect(markerFor(page, 'event_0002')).toHaveAttribute('aria-pressed', 'true')
+  await page.getByLabel('탐지 종류').selectOption('D20')
+  await expect(positionLabel(page)).toHaveCount(0)
+  await expect(markers(page)).toHaveCount(0)
+  await expect(heading(page, '조건에 맞는 장면이 없습니다')).toBeVisible()
+  await page.getByRole('complementary').getByRole('button', { name: '필터 초기화' }).click()
+  await expect(page.getByLabel('정렬')).toHaveValue('score')
+  await expect(positionLabel(page)).toHaveText('2 / 3')
+  await expect(rows(page).nth(1)).toHaveAttribute('aria-pressed', 'true')
+  expect(await videoTime(page)).toBe(7)
+})
+
+test('타임라인과 이전 장면 선택 시 필요한 경우에만 데스크톱 목록 내부를 스크롤한다', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1024 })
+  const events = Array.from({ length: 12 }, (_, index) => scene(index + 1, 'D00', index * 1.6, 0.6))
+  await page.route(api + resultPath, route => json(route, results(events)))
+  await page.goto(resultPath)
+  const list = page.getByRole('group', { name: '의심 장면 목록' })
+  const listTop = () => list.evaluate(element => element.scrollTop)
+  const scrollY = () => page.evaluate(() => window.scrollY)
+  await markerFor(page, 'event_0012').scrollIntoViewIfNeeded()
+  const yBefore = await scrollY()
+  expect(await listTop()).toBe(0)
+  await markerFor(page, 'event_0012').click()
+  await expect(rows(page).last()).toHaveAttribute('aria-pressed', 'true')
+  const yInList = await listTop()
+  expect(yInList).toBeGreaterThan(0)
+  expect(await scrollY()).toBe(yBefore)
+  expect(await rows(page).last().evaluate(row => {
+    const list = row.parentElement!.getBoundingClientRect()
+    const bounds = row.getBoundingClientRect()
+    return bounds.top >= list.top && bounds.bottom <= list.bottom
+  })).toBe(true)
+  await button(page, '이전 장면').click()
+  await expect(rows(page).nth(10)).toHaveAttribute('aria-pressed', 'true')
+  expect(await listTop()).toBe(yInList)
+})
+
+test('영상 길이 미확인일 때 타임라인 안내와 목록·장면 탐색을 제공한다', async ({ page }) => {
+  const result = results()
+  result.video.duration_sec = null
+  await page.route(api + resultPath, route => json(route, result))
+  await page.goto(resultPath)
+  await expect(page.getByText('영상 길이 정보가 없어 구간 위치를 표시할 수 없습니다.', { exact: false })).toBeVisible()
+  await expect(markers(page)).toHaveCount(0)
+  await button(page, '다음 장면').click()
+  await expect(positionLabel(page)).toHaveText('2 / 3')
+  await expect(rows(page).nth(1)).toHaveAttribute('aria-pressed', 'true')
+})
+
+test.describe('터치 뷰포트', () => {
+  test.use({ viewport: { width: 390, height: 844 }, hasTouch: true })
+
+  test('목록에서 상세 이동과 복귀, 밀집 장면 선택 및 확대 닫기', async ({ page }) => {
+    await mockVideoMetadata(page)
+    await page.route(api + resultPath, route => json(route, results(denseScenes)))
+    await page.goto(resultPath)
+    await loadMockMetadata(page)
+    const selectedHeading = heading(page, '선택한 대표 장면')
+    await rows(page).last().tap()
+    await expect(selectedHeading).toBeFocused()
+    await expect(selectedHeading).toBeInViewport()
+    await expect(positionLabel(page)).toHaveText('5 / 5')
+    await button(page, '이전 장면').tap()
+    await expect(positionLabel(page)).toHaveText('4 / 5')
+    await expect.poll(() => videoTime(page)).toBe(5)
+    await button(page, '목록으로').tap()
+    await expect(rows(page).nth(3)).toBeFocused()
+    await expect(rows(page).nth(3)).toBeInViewport()
+
+    await markerFor(page, 'event_0003').tap()
+    expect(await videoTime(page)).toBe(5)
+    await page.getByRole('group', { name: '모아 표시한 의심 장면' }).getByRole('button', { name: /00:03\.5 · 포트홀/ }).tap()
+    await expect(selectedHeading).toBeInViewport()
+    await expect(selectedHeading).toBeFocused()
+    await expect.poll(() => videoTime(page)).toBe(3.5)
+    await button(page, '이미지 확대').tap()
+    await expect(page.getByRole('dialog')).toBeInViewport()
+    await button(page, '닫기').tap()
+    await expect(button(page, '이미지 확대')).toBeFocused()
+    expect(await videoTime(page)).toBe(3.5)
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390)
+  })
 })

@@ -3,7 +3,7 @@ import { Check, CircleAlert, FileVideo, LoaderCircle, Pause, Play, ScanLine } fr
 import { ApiRequestError, apiErrorMessage, errorMessage, getJob } from '../api/client'
 import type { JobStatus } from '../api/types'
 import { useJobQuery } from '../api/useJobQuery'
-import { Button, JobNotice, StatusBadge } from '../components/ui'
+import { Button, JobInfo, JobNotice, StatusBadge } from '../components/ui'
 import { PHASE_LABELS, PHASE_MESSAGES, type AnalysisPhase } from '../config/service'
 import { useSession } from '../mocks/SessionContext'
 
@@ -65,7 +65,7 @@ function AnalysisView({ jobId, phase, filename, queryError, onRetry, failure, ex
         {example && <p className="muted">화면 확인용 예시 상태입니다.</p>}
         {queryError && phase && <p className="muted">위에는 마지막으로 받은 분석 상태를 표시합니다.</p>}
       </div>
-      <div className="file-summary"><FileVideo size={20} aria-hidden="true" /><div><strong>{filename ?? (example ? '개발용 예시 영상' : '원본 영상')}</strong><p className="small muted job-id">작업 ID · {jobId}</p></div></div>
+      <div className="file-summary"><FileVideo size={20} aria-hidden="true" /><div><strong>{filename ?? (example ? '개발용 예시 영상' : '원본 영상')}</strong><JobInfo jobId={jobId} /></div></div>
       <ol className="stage-list" aria-label="분석 처리 단계">{stages.map((stage, index) => <li key={stage} className={phase === stage ? 'current' : currentIndex > index ? 'done' : ''} aria-current={phase === stage ? 'step' : undefined}><span>{currentIndex > index ? <Check size={16} aria-hidden="true" /> : index + 1}</span>{PHASE_LABELS[stage]}</li>)}</ol>
       {queryError && <p role="alert" className="error-message">{queryError}</p>}
       {failed && <p role="alert" className="error-message">{failure ?? '영상 분석에 실패했습니다. 영상을 다시 선택해 주세요.'}</p>}

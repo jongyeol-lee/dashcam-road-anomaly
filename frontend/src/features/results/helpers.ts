@@ -10,6 +10,14 @@ export function formatTime(seconds: number | null): string {
     : `${String(minutes).padStart(2, '0')}:${sec}`
 }
 
+export function formatSceneTime(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return formatTime(seconds)
+  const milliseconds = Math.round(seconds * 1000)
+  const whole = formatTime(Math.floor(milliseconds / 1000))
+  const fraction = String(milliseconds % 1000).padStart(3, '0').replace(/0+$/, '')
+  return fraction ? `${whole}.${fraction}` : whole
+}
+
 export function timelinePosition(time: number, duration: number | null): number | null {
   // 메타데이터가 없거나 범위 밖이면 임의의 영상 길이·위치를 만들지 않는다.
   if (duration === null || !Number.isFinite(duration) || duration <= 0

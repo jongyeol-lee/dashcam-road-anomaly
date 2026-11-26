@@ -1,14 +1,17 @@
 import { AlertCircle, CircleCheck, FlaskConical, Route } from 'lucide-react'
 import { Link, useMatch } from 'react-router'
-import type { ButtonHTMLAttributes, ReactNode } from 'react'
+import type { ComponentPropsWithRef, ReactNode } from 'react'
 import { PHASE_LABELS, SERVICE_NAME, type AnalysisPhase } from '../config/service'
 
-export function Button({ variant = 'primary', className = '', children, ...props }: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: 'primary' | 'secondary' | 'ghost'; children: ReactNode }) {
+export function Button({ variant = 'primary', className = '', children, ...props }: ComponentPropsWithRef<'button'> & { variant?: 'primary' | 'secondary' | 'ghost'; children: ReactNode }) {
   return <button className={`button button-${variant} ${className}`} {...props}>{children}</button>
 }
 export function StatusBadge({ phase }: { phase: AnalysisPhase }) {
   return <span className={`badge ${phase === 'completed' ? 'badge-success' : phase === 'failed' ? 'badge-error' : ''}`}>
     {phase === 'completed' && <CircleCheck size={14} aria-hidden="true" />}{PHASE_LABELS[phase]}</span>
+}
+export function JobInfo({ jobId }: { jobId: string }) {
+  return <details className="job-id muted"><summary>작업 정보</summary><p>작업 ID · {jobId}</p></details>
 }
 export function EmptyState({ title, children }: { title: string; children: ReactNode }) {
   return <div className="empty-state"><AlertCircle size={28} aria-hidden="true" /><h2>{title}</h2>{children}</div>

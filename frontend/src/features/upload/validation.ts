@@ -10,5 +10,9 @@ export function validateFiles(files: ArrayLike<Pick<File, 'name' | 'size'>>): st
 }
 
 export function formatFileSize(bytes: number): string {
-  return `${(bytes / 1024 / 1024).toLocaleString('ko-KR', { maximumFractionDigits: 2 })} MiB`
+  const kibibyte = 1024
+  const mebibyte = kibibyte * 1024
+  if (bytes < kibibyte) return `${bytes.toLocaleString('ko-KR')} B`
+  const [divisor, unit] = bytes < mebibyte ? [kibibyte, 'KiB'] : [mebibyte, 'MiB']
+  return `${(bytes / divisor).toLocaleString('ko-KR', { maximumFractionDigits: 2 })} ${unit}`
 }

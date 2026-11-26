@@ -57,7 +57,7 @@ export function UploadPage() {
 
   return <main className="page upload-page">
     <section className="intro"><span className="eyebrow"><ScanLine size={16} aria-hidden="true" />블랙박스 영상 검토 워크스페이스</span><h1>일상 속 주행 영상에서<br />도로의 이상 징후를 발견하세요.</h1><p>블랙박스 영상을 분석하여 확인이 필요한 도로 균열과<br className="desktop-break" /> 포트홀 의심 장면을 찾아드립니다.</p></section>
-    <section className="panel upload-panel" aria-labelledby="upload-heading"><div className="panel-heading"><h2 id="upload-heading">주행 영상 선택</h2><span className="small muted">MP4 · 최대 200 MiB</span></div>
+    <section className="panel upload-panel" aria-labelledby="upload-heading"><div className="panel-heading"><h2 id="upload-heading">주행 영상 선택</h2><span id="file-limit" className="small muted">MP4 · 최대 200 MiB</span></div>
       <div className={`drop-zone ${dragging ? 'dragging' : ''} ${file ? 'has-file' : ''}`}
         onDragEnter={event => { event.preventDefault(); if (!uploadRequest.current) { dragDepth.current += 1; setDragging(true) } }}
         onDragOver={event => event.preventDefault()}
@@ -65,10 +65,10 @@ export function UploadPage() {
         onDrop={event => { event.preventDefault(); dragDepth.current = 0; setDragging(false); selectFiles(event.dataTransfer.files) }}>
         <span className="upload-symbol">{file ? <FileVideo size={30} aria-hidden="true" /> : <Upload size={30} aria-hidden="true" />}</span>
         {file ? <><h3 className="filename">{file.name}</h3><p><Check size={15} aria-hidden="true" /> 파일 선택됨 · {formatFileSize(file.size)}</p></> : <><h3>여기에 영상을 놓아주세요</h3><p>또는 파일을 선택해 시작할 수 있어요.</p></>}
-        <input ref={fileInput} id="video-file" className="sr-only" type="file" accept=".mp4,video/mp4" aria-label="MP4 영상 선택" aria-describedby="file-help file-error" disabled={uploading}
+        <input ref={fileInput} id="video-file" className="sr-only" type="file" accept=".mp4,video/mp4" aria-label="MP4 영상 선택" aria-describedby="file-help file-limit file-error" disabled={uploading}
           onChange={event => { if (event.target.files?.length) selectFiles(event.target.files); event.target.value = '' }} />
         <div className="button-row"><Button type="button" variant="secondary" disabled={uploading} onClick={() => fileInput.current?.click()}>{file ? '파일 변경' : 'MP4 파일 선택'}</Button>{file && <Button type="button" variant="ghost" disabled={uploading} onClick={() => { setFile(null); setError(null); setUploadError(null) }}><X size={16} aria-hidden="true" />선택 취소</Button>}</div>
-        <p className="small muted" id="file-help">파일 1개 · 최대 209,715,200바이트</p>
+        <p className="small muted" id="file-help">한 번에 파일 1개</p>
       </div>
       <div id="file-error" role="alert">{error && <p className="error-message">{error}</p>}</div>
       <div className="upload-bottom"><p className="small muted" role="status">{serverStatus}</p><Button disabled={!file || uploading} onClick={startAnalysis}>{uploading ? <LoaderCircle className="animate-spin" size={18} aria-hidden="true" /> : <ScanLine size={18} aria-hidden="true" />}{uploading ? '업로드 및 영상 확인 중' : '분석 시작'}</Button></div>

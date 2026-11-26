@@ -1,6 +1,7 @@
 import type { ClassCode } from '../api/types'
 
 export const SERVICE_NAME = '도로환경 AI 분석'
+export const API_BASE = 'http://127.0.0.1:8000'
 export const MAX_UPLOAD_BYTES = 209715200
 export const CLASS_LABELS: Record<ClassCode, string> = {
   D00: '종방향 균열', D10: '횡방향 균열', D20: '거북등 균열', D40: '포트홀',

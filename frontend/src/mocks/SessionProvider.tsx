@@ -32,14 +32,6 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   const value: Session = {
     jobs, reviews,
-    createExample(scenario, filename) {
-      const id = crypto.randomUUID()
-      const entry: DemoJob = {
-        phase: 'uploading', job: null, auto: true, clientFilename: filename, result: makeResults(id, scenario),
-      }
-      setJobs(previous => ({ ...previous, [id]: entry }))
-      return id
-    },
     setPhase(id, phase) {
       setJobs(previous => previous[id] ? { ...previous, [id]: { ...updatePhase(previous[id], phase), auto: false } } : previous)
     },

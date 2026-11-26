@@ -135,6 +135,7 @@
   .timeline-panel h2 { font-size: .9375rem; }
   .timeline-track { position: relative; margin: 20px 16px 0; height: 38px; }
   .timeline-track::before { content: ''; height: 5px; border-radius: 6px; background: #dce5ee; top: 16px; position: absolute; left: 0; right: 0; }
+  .timeline-playhead { position: absolute; z-index: 1; top: 2px; height: 34px; border-left: 2px solid var(--color-primary); transform: translateX(-50%); pointer-events: none; }
   .timeline-marker { width: 32px; height: 38px; position: absolute; top: 0; transform: translateX(-50%); display: grid; place-items: center; border-radius: 5px; }
   .timeline-marker span { width: 10px; height: 16px; background: #b26a13; border-radius: 3px; border: 2px solid white; outline: 1px solid #b26a13; }
   .timeline-marker.selected { background: #e7eff6; }

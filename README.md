@@ -122,10 +122,12 @@ Python 분석 함수는 `road_anomaly.video_analysis.analyze_video(Path(mp4_path
 ```powershell
 .\.venv\Scripts\python.exe -B -X utf8 -m pip install -r requirements-web.txt
 .\.venv\Scripts\python.exe -B -X utf8 -m pip check
-.\.venv\Scripts\python.exe -B -X utf8 -m uvicorn road_anomaly.api.main:app --app-dir src --host 127.0.0.1 --port 8000 --workers 1
+.\.venv\Scripts\python.exe -B -X utf8 -m src.road_anomaly.api
 ```
 
 Swagger UI: <http://127.0.0.1:8000/docs> · OpenAPI: <http://127.0.0.1:8000/openapi.json>. [API 규약과 응답 예시](docs/api_contract.md) · [설치 버전](docs/ENVIRONMENT.md#part-61-웹-의존성-추가)
+
+프로젝트 실행 명령은 Windows에서 Selector 이벤트 루프와 3초 HTTP 종료 대기를 적용합니다. 종료가 시작되면 새 작업 등록과 대기 작업의 실행을 막고 새 연결 수신을 중단합니다. 전송 중인 HTTP 응답이 3초 안에 끝나지 않으면 해당 요청을 취소합니다. 실행 중인 GPU 작업은 끝까지 기다리고, 대기 작업은 `failed/interrupted`로 처리합니다. Windows 이외에서는 Uvicorn 기본 루프와 종료 설정을 사용합니다. 기존 ASGI import 경로도 사용할 수 있으며, 직접 Uvicorn을 실행할 때는 그 명령에 전달한 옵션으로 동작합니다. [Windows 종료 검증](docs/experiments/part6_server_shutdown_stability.md)
 
 MVP 가중치는 Git에 포함하지 않습니다. 학습 결과의 `outputs/yolo_multicountry/czech_japan_pilot_v1_yolo11n_640_b4_s42_e30/weights/best.pt`를 준비하고 아래 해시를 확인합니다. 다른 모델을 사용할 때에는 별도 검증과 프로필 변경이 필요하며 API 요청으로 모델을 바꿀 수 없습니다. [학습 과정](docs/experiments/part5_multicountry_model_training.md)
 

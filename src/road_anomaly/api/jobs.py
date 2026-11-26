@@ -156,11 +156,15 @@ class JobManager:
             self._process_lock.close()
             self._process_lock = None
 
-    def stop(self) -> None:
-        # 등록과 종료 신호를 같은 잠금으로 묶어 sentinel 뒤에 새 작업이 들어가지 않게 한다.
+    def begin_shutdown(self) -> None:
+        # 등록·실행 시작·종료 신호를 같은 잠금으로 묶는다.
         with self._lock:
-            self._stopping.set()
-            self._queue.put(None)
+            if not self._stopping.is_set():
+                self._stopping.set()
+                self._queue.put(None)
+
+    def stop(self) -> None:
+        self.begin_shutdown()
         if self._thread is not None:
             # 이미 실행 중인 동기 추론이 끝난 뒤 설정과 잠금을 해제한다.
             self._thread.join()
@@ -209,11 +213,12 @@ class JobManager:
     def _work(self) -> None:
         while (job_id := self._queue.get()) is not None:
             try:
-                if self._stopping.is_set():
-                    self._update(job_id, status="failed", finished_at=datetime.now(UTC),
-                                 error=ApiError(code="interrupted", message="서버 종료로 대기 작업이 중단됐습니다."))
-                    continue
-                self._update(job_id, status="running", started_at=datetime.now(UTC))
+                with self._lock:
+                    if self._stopping.is_set():
+                        self._update(job_id, status="failed", finished_at=datetime.now(UTC),
+                                     error=ApiError(code="interrupted", message="서버 종료로 대기 작업이 중단됐습니다."))
+                        continue
+                    self._update(job_id, status="running", started_at=datetime.now(UTC))
                 self.analyzer(
                     self.video_path(job_id), profile="mvp", run_name=str(job_id),
                     max_event_duration=self.settings.max_event_duration,

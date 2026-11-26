@@ -9,7 +9,7 @@ Set-Location frontend
 npm.cmd run dev
 ```
 
-개발 화면 `http://127.0.0.1:5173`은 FastAPI `http://127.0.0.1:8000`에 연결된다. 업로드 화면의 예시는 API 없이 사용할 수 있다. [백엔드 실행 방법](../README.md#fastapi-로컬-백엔드)
+개발 화면 `http://127.0.0.1:5173`은 FastAPI `http://127.0.0.1:8000`에 연결된다. 실제 영상 분석에는 프로젝트 전용 FastAPI 실행 명령을 사용한다. 업로드 화면의 예시는 API 없이 사용할 수 있다. [백엔드 실행 방법](../README.md#fastapi-로컬-백엔드)
 
 ```powershell
 npm.cmd run typecheck -- --force

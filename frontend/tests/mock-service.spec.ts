@@ -1,5 +1,5 @@
 import { expect, test, type Page, type Route } from '@playwright/test'
-import type { AnalysisResults, JobState, Scene } from '../src/api/types'
+import type { AnalysisResults, JobState, ReviewState, Scene, SceneReview } from '../src/api/types'
 
 const api = 'http://127.0.0.1:8000/api'
 const job = '10000000-2000-4000-8000-000000000001'
@@ -15,7 +15,10 @@ const scenePng = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0
 function json(route: Route, body: object, status = 200) {
   return route.fulfill({
     status, json: body,
-    headers: { 'access-control-allow-origin': '*', 'cache-control': 'no-store' },
+    headers: {
+      'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET, PUT',
+      'access-control-allow-headers': 'Content-Type', 'cache-control': 'no-store',
+    },
   })
 }
 
@@ -57,6 +60,38 @@ function hold() {
   return { pending, release }
 }
 
+async function mockReviews(page: Page, options: {
+  initial?: Record<string, SceneReview[]>
+  beforeGet?: (id: string) => Promise<boolean>
+  beforeSave?: (id: string, entry: SceneReview) => Promise<boolean>
+} = {}) {
+  const stored = new Map(Object.entries(options.initial ?? {}))
+  const gets: string[] = []
+  const puts: SceneReview[] = []
+  await page.route(api + '/jobs/*/reviews', async route => {
+    const id = new URL(route.request().url()).pathname.split('/')[3]
+    gets.push(id)
+    if (await options.beforeGet?.(id) === false) {
+      return json(route, { error: { code: 'review_data_invalid', message: '테스트 오류' } }, 500)
+    }
+    return json(route, { job_id: id, reviews: stored.get(id) ?? [] })
+  })
+  await page.route(api + '/jobs/*/reviews/*', async route => {
+    if (route.request().method() === 'OPTIONS') return json(route, {})
+    expect(route.request().method()).toBe('PUT')
+    const [, , , id, , event_id] = new URL(route.request().url()).pathname.split('/')
+    const { review } = route.request().postDataJSON() as { review: ReviewState }
+    const entry = { event_id, review, updated_at: timestamp }
+    puts.push(entry)
+    if (await options.beforeSave?.(id, entry) === false) {
+      return json(route, { error: { code: 'review_save_failed', message: '테스트 오류' } }, 500)
+    }
+    stored.set(id, [...(stored.get(id) ?? []).filter(item => item.event_id !== event_id), entry])
+    return json(route, entry)
+  })
+  return { gets, puts }
+}
+
 const fileInput = (page: Page) => page.locator('input[type=file]')
 const heading = (page: Page, name: string) => page.getByRole('heading', { name, exact: true })
 const button = (page: Page, name: string) => page.getByRole('button', { name, exact: true })
@@ -65,6 +100,7 @@ const positionLabel = (page: Page) => page.getByRole('status', { name: '표시 �
 const markers = (page: Page) => page.getByRole('group', { name: '의심 구간 위치' }).getByRole('button')
 const markerFor = (page: Page, id: string) => markers(page).and(page.locator(`[data-event-ids~="${id}"]`))
 const videoTime = (page: Page) => page.locator('video').evaluate((video: HTMLVideoElement) => video.currentTime)
+const reviewRadio = (page: Page, name: string) => page.getByRole('radio', { name, exact: true })
 
 async function mockVideoMetadata(page: Page) {
   // 미디어 메타데이터 도착 순서와 seek 요청만 제어한다. 실제 디코딩은 실영상 검증에서 확인한다.
@@ -104,6 +140,7 @@ test.beforeEach(async ({ page }) => {
   await page.route(api + '/**', route => route.abort())
   await page.route(api + '/health', route => json(route, { status: 'ok' }))
   await page.route(api + '/jobs/*/scenes/*', route => route.fulfill({ contentType: 'image/png', body: scenePng }))
+  await mockReviews(page)
 })
 
 test('파일 선택, 변경, 취소 및 브라우저 입력 검증', async ({ page }) => {
@@ -191,6 +228,32 @@ test('중복 업로드 차단, queued → running → completed, 완료 후 폴�
   await page.clock.runFor(3500)
   expect(polls).toBe(3)
   expect(uploads).toBe(1)
+})
+
+test('실제·예시 단계가 항목 수에 맞는 같은 너비의 열로 영역을 채운다', async ({ page }) => {
+  await page.route(api + jobPath, route => json(route, status(job, 'completed')))
+  const examplePath = '/examples/jobs/00000000-0000-4000-8000-000000000001'
+  for (const [path, count] of [[jobPath, 3], [examplePath, 4]] as const) {
+    await page.goto(path)
+    const stages = page.getByRole('list', { name: '분석 처리 단계' })
+    await expect(stages.getByRole('listitem')).toHaveCount(count)
+    for (const [width, height] of [[1440, 1024], [390, 844]]) {
+      await page.setViewportSize({ width, height })
+      const layout = await stages.evaluate(element => {
+        const items = [...element.children].map(item => item.getBoundingClientRect())
+        return {
+          columns: getComputedStyle(element).gridTemplateColumns.split(/\s+/).length,
+          remaining: element.getBoundingClientRect().right - items.at(-1)!.right,
+          equalWidths: items.every(item => Math.abs(item.width - items[0].width) < 1),
+          documentWidth: document.documentElement.scrollWidth,
+        }
+      })
+      expect(layout.columns).toBe(count)
+      expect(Math.abs(layout.remaining)).toBeLessThan(1)
+      expect(layout.equalWidths).toBe(true)
+      expect(layout.documentWidth).toBe(width)
+    }
+  }
 })
 
 test('실패 메시지와 실패 후 폴링 중단', async ({ page }) => {
@@ -305,12 +368,19 @@ test('예시와 실작업 URL 분리, 작업 URL 직접 접근과 새로고침',
     return route.request().url().endsWith('/results')
       ? json(route, results()) : json(route, status(job, 'completed'))
   })
+  const { gets, puts } = await mockReviews(page)
   await page.goto('/')
   await page.getByRole('link', { name: '예시 화면 보기' }).click()
   await expect(page).toHaveURL(/\/examples\/jobs\/[a-f0-9-]+\/results$/)
   await expect(page.getByText('개발용 예시 모드')).toBeVisible()
   await expect(rows(page)).toHaveCount(6)
+  await reviewRadio(page, '파손 의심').check()
+  await expect(page.getByTestId('review-count')).toHaveText('1 / 6')
+  await page.reload()
+  await expect(reviewRadio(page, '미검토')).toBeChecked()
   expect(queried).toEqual([])
+  expect(gets).toEqual([])
+  expect(puts).toEqual([])
 
   await page.goto(jobPath)
   await expect(heading(page, '영상 분석이 완료되었습니다.')).toBeVisible()
@@ -320,6 +390,7 @@ test('예시와 실작업 URL 분리, 작업 URL 직접 접근과 새로고침',
   await expect(heading(page, '영상 분석 결과')).toBeVisible()
   await page.reload()
   await expect(rows(page)).toHaveCount(3)
+  await expect(reviewRadio(page, '미검토')).toBeChecked()
   await expect(page.getByText('개발용 예시 모드')).toHaveCount(0)
   expect(queried.filter(url => url === '/api' + jobPath)).toHaveLength(2)
   expect(queried.filter(url => url === '/api' + resultPath)).toHaveLength(2)
@@ -335,13 +406,13 @@ test('장면 선택, 클래스 필터, 시간·점수 정렬과 검토 개수', 
   await rows(page).first().click()
   await expect(page.getByTestId('scene-detail')).toContainText('event_0002')
   await expect(rows(page).first()).toHaveAttribute('aria-pressed', 'true')
-  await page.getByRole('radio', { name: '오탐' }).check()
+  await reviewRadio(page, '오탐').click()
   await expect(page.getByTestId('review-count')).toHaveText('1 / 3')
-  await page.getByRole('radio', { name: '미검토' }).check()
+  await reviewRadio(page, '미검토').click()
   await expect(page.getByTestId('review-count')).toHaveText('0 / 3')
-  await page.getByRole('radio', { name: '판단 보류' }).check()
+  await reviewRadio(page, '판단 보류').click()
   await expect(page.getByTestId('review-count')).toHaveText('1 / 3')
-  await page.getByRole('checkbox', { name: '미검토 장면만 보기' }).check()
+  await page.getByLabel('검토 상태').selectOption('unreviewed')
   await expect(rows(page)).toHaveCount(2)
   await page.getByLabel('탐지 종류').selectOption('D00')
   await expect(rows(page).first()).toHaveAttribute('data-event-id', 'event_0003')
@@ -352,6 +423,155 @@ test('장면 선택, 클래스 필터, 시간·점수 정렬과 검토 개수', 
   await expect(heading(page, '조건에 맞는 장면이 없습니다')).toBeVisible()
   await page.getByRole('complementary').getByRole('button', { name: '필터 초기화' }).click()
   await expect(rows(page)).toHaveCount(3)
+})
+
+test('검토 조회 지연과 실패 중 영상·장면을 열고 다시 조회해 서버 상태를 복원한다', async ({ page }) => {
+  const firstGet = hold()
+  let attempts = 0
+  await mockReviews(page, {
+    initial: { [job]: [{ event_id: 'event_0001', review: 'suspected', updated_at: timestamp }] },
+    async beforeGet() {
+      if (++attempts !== 1) return true
+      await firstGet.pending
+      return false
+    },
+  })
+  await mockVideoMetadata(page)
+  await page.route(api + resultPath, route => json(route, results()))
+  await page.goto(resultPath)
+  await expect(page.getByRole('status').filter({ hasText: '검토 결과를 불러오고 있습니다.' })).toBeVisible()
+  await expect(reviewRadio(page, '미검토')).toBeDisabled()
+  await expect(reviewRadio(page, '미검토')).not.toBeChecked()
+  await expect(page.getByLabel('검토 상태')).toBeDisabled()
+  await expect(page.getByTestId('review-count')).toHaveCount(0)
+  await expect(rows(page).first()).not.toContainText('미검토')
+  await loadMockMetadata(page)
+  await rows(page).nth(1).click()
+  await expect.poll(() => videoTime(page)).toBe(8)
+  await expect(button(page, '이미지 확대')).toBeEnabled()
+  firstGet.release()
+  await expect(page.getByRole('alert').filter({ hasText: '검토 결과를 불러오지 못했습니다.' })).toBeVisible()
+  await expect(reviewRadio(page, '미검토')).not.toBeChecked()
+  await rows(page).first().click()
+  await button(page, '검토 결과 다시 불러오기').click()
+  await expect(reviewRadio(page, '파손 의심')).toBeChecked()
+  await expect(page.getByTestId('review-count')).toHaveText('1 / 3')
+  await expect.poll(() => videoTime(page)).toBe(3)
+})
+
+test('같은 장면의 연속 입력을 잠그고 여러 장면 저장 및 실패 재시도를 처리한다', async ({ page }) => {
+  const firstSave = hold()
+  let failFirst = true
+  const { puts } = await mockReviews(page, {
+    async beforeSave(_, entry) {
+      if (entry.event_id !== 'event_0001' || !failFirst) return true
+      await firstSave.pending
+      failFirst = false
+      return false
+    },
+  })
+  await mockVideoMetadata(page)
+  await page.route(api + resultPath, route => json(route, results()))
+  await page.goto(resultPath)
+  await loadMockMetadata(page)
+  await setMockVideoTime(page, 7)
+  await reviewRadio(page, '파손 의심').click()
+  const detail = page.getByTestId('scene-detail')
+  await expect(detail.getByText('저장 중 · 파손 의심')).toBeVisible()
+  await expect(reviewRadio(page, '오탐')).toBeDisabled()
+  await expect(reviewRadio(page, '미검토')).toBeChecked()
+  await expect(page.getByTestId('review-count')).toHaveText('0 / 3')
+  await reviewRadio(page, '오탐').press('Space')
+  expect(puts).toHaveLength(1)
+  expect(await videoTime(page)).toBe(7)
+
+  await rows(page).nth(1).click()
+  await reviewRadio(page, '판단 보류').click()
+  await expect(detail.getByText('저장 완료 · 판단 보류')).toBeVisible()
+  firstSave.release()
+  await expect(page.getByRole('alert').filter({ hasText: 'event_0001 · 저장 실패 · 파손 의심' })).toBeVisible()
+  await expect(reviewRadio(page, '판단 보류')).toBeChecked()
+  await expect(page.getByTestId('review-count')).toHaveText('1 / 3')
+  await rows(page).first().click()
+  await setMockVideoTime(page, 7)
+  await expect(reviewRadio(page, '미검토')).toBeChecked()
+  await expect(detail.getByRole('alert')).toContainText('저장 실패 · 파손 의심')
+  await detail.getByRole('button', { name: '검토 저장 다시 시도' }).click()
+  await expect(detail.getByText('저장 완료 · 파손 의심')).toBeVisible()
+  await expect(reviewRadio(page, '파손 의심')).toBeChecked()
+  await expect(page.getByTestId('review-count')).toHaveText('2 / 3')
+  expect(await videoTime(page)).toBe(7)
+  expect(puts.map(entry => entry.review)).toEqual(['suspected', 'deferred', 'suspected'])
+})
+
+test('검토 상태별 목록·타임라인·장면 탐색과 전체 집계를 함께 유지한다', async ({ page }) => {
+  const events = [...scenes, scene(4, 'D00', 16, 0.95), scene(5, 'D20', 19, 0.4)]
+  const values: ReviewState[] = ['suspected', 'false_positive', 'suspected', 'deferred']
+  await mockReviews(page, {
+    initial: { [job]: values.map((review, index) => ({ review, event_id: events[index].event_id, updated_at: timestamp })) },
+  })
+  await mockVideoMetadata(page)
+  await page.route(api + resultPath, route => json(route, results(events)))
+  await page.goto(resultPath)
+  await loadMockMetadata(page)
+  await setMockVideoTime(page, 6)
+  const filter = page.getByLabel('검토 상태')
+  await expect(page.getByTestId('review-count')).toHaveText('4 / 5')
+  const totals = page.getByLabel('전체 장면의 검토 현황')
+  await expect(totals.locator('div')).toHaveText(['미검토1개', '파손 의심2개', '오탐1개', '판단 보류1개'])
+  for (const [state, id] of [['unreviewed', 'event_0005'], ['false_positive', 'event_0002'], ['deferred', 'event_0004']]) {
+    await filter.selectOption(state)
+    await expect(rows(page)).toHaveCount(1)
+    await expect(rows(page).first()).toHaveAttribute('data-event-id', id)
+    await expect(markerFor(page, id)).toHaveAttribute('aria-pressed', 'true')
+    expect(await videoTime(page)).toBe(6)
+  }
+  await filter.selectOption('suspected')
+  await page.getByLabel('탐지 종류').selectOption('D00')
+  await page.getByLabel('정렬').selectOption('score')
+  await expect(rows(page)).toHaveCount(2)
+  await expect(markers(page)).toHaveCount(2)
+  await expect(page.getByText('표시 중 2개')).toBeVisible()
+  await expect(page.getByTestId('review-count')).toHaveText('4 / 5')
+  expect(await videoTime(page)).toBe(6)
+  await button(page, '이전 장면').click()
+  await expect(markerFor(page, 'event_0003')).toHaveAttribute('aria-pressed', 'true')
+  await button(page, '다음 장면').click()
+  await expect(markerFor(page, 'event_0001')).toHaveAttribute('aria-pressed', 'true')
+  await expect.poll(() => videoTime(page)).toBe(3)
+  await reviewRadio(page, '미검토').click()
+  await expect(page.getByText(/event_0001 · 저장 완료 · 미검토/)).toBeVisible()
+  await expect(rows(page)).toHaveCount(1)
+  await expect(markerFor(page, 'event_0003')).toHaveAttribute('aria-pressed', 'true')
+  await expect(button(page, '다음 장면')).toBeDisabled()
+  await expect(page.getByTestId('review-count')).toHaveText('3 / 5')
+  expect(await videoTime(page)).toBe(3)
+})
+
+test('저장 중 페이지 이탈 후 재접속과 새로고침에서 작업별 상태를 복원한다', async ({ page }) => {
+  const saving = hold()
+  const { gets, puts } = await mockReviews(page, { async beforeSave() { await saving.pending; return true } })
+  await page.route(api + '/jobs/*/results', route => json(route, results(scenes, new URL(route.request().url()).pathname.split('/')[3])))
+  await page.goto(resultPath)
+  await reviewRadio(page, '파손 의심').click()
+  await expect(page.getByText('저장 중 · 파손 의심')).toBeVisible()
+  await page.getByRole('link', { name: '새 영상 분석' }).click()
+  await page.goBack()
+  await expect(page).toHaveURL(resultPath)
+  await expect(page.getByText('검토 결과를 불러오고 있습니다.')).toBeVisible()
+  await expect(reviewRadio(page, '미검토')).not.toBeChecked()
+  expect(gets).toEqual([job])
+  saving.release()
+  await expect(reviewRadio(page, '파손 의심')).toBeChecked()
+  expect(gets).toEqual([job, job])
+  expect(puts).toHaveLength(1)
+  await page.reload()
+  await expect(reviewRadio(page, '파손 의심')).toBeChecked()
+  await page.goto(`/jobs/${otherJob}/results`)
+  await expect(reviewRadio(page, '미검토')).toBeChecked()
+  await expect(page.getByTestId('review-count')).toHaveText('0 / 3')
+  await page.goto(resultPath)
+  await expect(reviewRadio(page, '파손 의심')).toBeChecked()
 })
 
 test('의심 구간이 없는 응답 표시', async ({ page }) => {

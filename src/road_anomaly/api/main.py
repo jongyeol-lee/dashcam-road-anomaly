@@ -7,7 +7,7 @@ from tempfile import TemporaryDirectory
 from typing import Annotated
 from uuid import UUID, uuid4
 
-from fastapi import FastAPI, File, UploadFile
+from fastapi import FastAPI, File, Path as PathParameter, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
@@ -15,7 +15,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException
 
 from .jobs import ApiSettings, JobError, JobManager, contained_path, validate_upload
-from .schemas import AnalysisResults, ErrorResponse, JobStatus
+from .schemas import AnalysisResults, ErrorResponse, EVENT_ID_PATTERN, JobReviews, JobStatus, ReviewUpdate, SceneReview
 
 
 logger = logging.getLogger(__name__)
@@ -83,7 +83,7 @@ def create_app(settings: ApiSettings | None = None, *, analyzer=None) -> FastAPI
     app.state.jobs = manager
     app.add_middleware(JsonErrorMiddleware)
     app.add_middleware(CORSMiddleware, allow_origins=list(settings.cors_origins),
-                       allow_methods=["GET", "POST", "HEAD"], allow_headers=["Content-Type", "Range"],
+                       allow_methods=["GET", "POST", "HEAD", "PUT"], allow_headers=["Content-Type", "Range"],
                        expose_headers=["Accept-Ranges", "Content-Range", "Content-Length"])
 
     @app.exception_handler(JobError)
@@ -157,6 +157,14 @@ def create_app(settings: ApiSettings | None = None, *, analyzer=None) -> FastAPI
     def results(job_id: UUID):
         return manager.results(job_id)
 
+    @app.get("/api/jobs/{job_id}/reviews", response_model=JobReviews)
+    def reviews(job_id: UUID):
+        return manager.reviews(job_id)
+
+    @app.put("/api/jobs/{job_id}/reviews/{event_id}", response_model=SceneReview)
+    def save_review(job_id: UUID, event_id: Annotated[str, PathParameter(pattern=EVENT_ID_PATTERN)], update: ReviewUpdate):
+        return manager.set_review(job_id, event_id, update.review)
+
     @app.head("/api/jobs/{job_id}/video", response_class=FileResponse, include_in_schema=False)
     @app.get("/api/jobs/{job_id}/video", response_class=FileResponse)
     def video(job_id: UUID):
@@ -168,7 +176,7 @@ def create_app(settings: ApiSettings | None = None, *, analyzer=None) -> FastAPI
 
     @app.get("/api/jobs/{job_id}/scenes/{event_id}", response_class=FileResponse)
     def scene(job_id: UUID, event_id: str):
-        if not re.fullmatch(r"event_[0-9]{4,}", event_id):
+        if not re.fullmatch(EVENT_ID_PATTERN, event_id):
             raise JobError(422, "invalid_request", "대표 이미지 ID를 확인해 주세요.")
         path = manager.scene_path(job_id, event_id)
         if not path.is_file():

@@ -3,10 +3,11 @@ import io
 import json
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from threading import Event, Lock, Thread
+from threading import Barrier, Event, Lock, Thread
 from time import monotonic, sleep
 from unittest.mock import patch
 from uuid import UUID, uuid4
@@ -36,6 +37,7 @@ class ApiTest(unittest.TestCase):
         self.root = Path(temp.name).resolve()
         self.settings = ApiSettings(project_root=self.root)
         self.empty = False
+        self.multiple_events = False
         self.calls = []
 
     def analyze(self, video, **options):
@@ -52,11 +54,13 @@ class ApiTest(unittest.TestCase):
             "representative_xyxy": [10, 20, 50, 60], "max_confidence": 0.7,
             "detection_count": 3, "detected_frame_count": 3, "representative_image": "scenes/event_0001.jpg",
         }]
+        if events and self.multiple_events:
+            events.append({**events[0], "event_id": "event_0002", "representative_image": "scenes/event_0002.jpg"})
         summary = {
             "run_name": job_id, "profile": "mvp", "video": {"path": str(video), "fps": 10, "width": 320,
             "height": 180, "frame_count": 30, "extracted_frame_count": 6},
             "video_duration_sec": 3, "inferred_frame_count": 6, "detected_frame_count": 0 if self.empty else 3,
-            "detection_count": 0 if self.empty else 3, "event_count": len(events), "analysis_seconds": 0.2,
+            "detection_count": 3 * len(events), "event_count": len(events), "analysis_seconds": 0.2,
             "model": {"path": str(self.root / "secret/best.pt"), "sha256": MVP_SHA256},
             "settings": settings, "timestamp_basis": "frame_index / fps",
         }
@@ -65,12 +69,13 @@ class ApiTest(unittest.TestCase):
         with (directory / "detections.csv").open("w", encoding="utf-8", newline="") as handle:
             writer = csv.writer(handle)
             writer.writerow(DETECTION_COLUMNS)
-            if not self.empty:
+            for _ in events:
                 writer.writerows((index, index / 10, 2, "D20", 0.7, 10, 20, 50, 60, "private.jpg") for index in (5, 10, 15))
-        if not self.empty:
+        if events:
             success, jpeg = cv2.imencode(".jpg", np.zeros((180, 320, 3), np.uint8))
             self.assertTrue(success)
-            (directory / "scenes/event_0001.jpg").write_bytes(jpeg.tobytes())
+            for event in events:
+                (directory / event["representative_image"]).write_bytes(jpeg.tobytes())
         return summary
 
     def client(self, analyzer=None, settings=None, **options):
@@ -285,6 +290,167 @@ class ApiTest(unittest.TestCase):
             for event_id in ("../summary.json", "%2e%2e%5csummary.json", "event_0001.jpg", "summary"):
                 self.assertIn(client.get(f"/api/jobs/{job_id}/scenes/{event_id}").status_code, (404, 422))
             self.assert_error(client.get(f"/api/jobs/{job_id}/scenes/event_9999"), 404, "not_found")
+
+    def test_reviews_round_trip_and_original_files_survive_restart(self):
+        self.multiple_events = True
+        with self.client() as client:
+            job_id = self.upload(client)
+            self.wait(client, job_id)
+            endpoint = f"/api/jobs/{job_id}/reviews"
+            job_dir = self.settings.jobs_root / job_id
+            analysis_dir = self.settings.analysis_root / job_id
+            originals = (job_dir / "job.json", job_dir / "results.json", analysis_dir / "detections.csv",
+                         analysis_dir / "scenes/event_0001.jpg", self.settings.uploads_root / job_id / "input.mp4")
+            snapshots = {path: path.read_bytes() for path in originals}
+            self.assertEqual(client.get(endpoint).json(), {"job_id": job_id, "reviews": []})
+            self.assertFalse((job_dir / "reviews.json").exists())
+
+            for state in ("suspected", "false_positive", "unreviewed"):
+                response = client.put(f"{endpoint}/event_0001", json={"review": state})
+                self.assertEqual(response.status_code, 200, response.text)
+                first = response.json()
+                self.assertEqual((first["event_id"], first["review"]), ("event_0001", state))
+                self.assertTrue(first["updated_at"].endswith("Z"))
+            second = client.put(f"{endpoint}/event_0002", json={"review": "deferred"}).json()
+            expected = {"job_id": job_id, "reviews": [first, second]}
+            self.assertEqual(second["review"], "deferred")
+            self.assertEqual(client.get(endpoint).json(), expected)
+            self.assertEqual(json.loads((job_dir / "reviews.json").read_bytes()), expected)
+
+            other = self.upload(client)
+            self.wait(client, other)
+            self.assertEqual(client.get(f"/api/jobs/{other}/reviews").json(), {"job_id": other, "reviews": []})
+        with self.client() as client:
+            self.assertEqual(client.get(endpoint).json(), expected)
+        self.assertEqual({path: path.read_bytes() for path in originals}, snapshots)
+        self.assertEqual(len(self.calls), 2)
+
+    def test_reviews_validate_ids_request_and_cors(self):
+        with self.client() as client:
+            job_id = self.upload(client)
+            self.wait(client, job_id)
+            endpoint = f"/api/jobs/{job_id}/reviews"
+            for ident, status, code in (("invalid-uuid", 422, "invalid_request"), (uuid4(), 404, "not_found")):
+                missing = f"/api/jobs/{ident}/reviews"
+                self.assert_error(client.get(missing), status, code)
+                self.assert_error(client.put(f"{missing}/event_0001", json={"review": "suspected"}), status, code)
+            for event_id in ("invalid", "event_0001.jpg", "%2e%2e%5cjob.json"):
+                self.assert_error(client.put(f"{endpoint}/{event_id}", json={"review": "suspected"}), 422, "invalid_request")
+            self.assert_error(client.put(f"{endpoint}/event_9999", json={"review": "suspected"}), 404, "not_found")
+            for payload in ({}, {"review": "damaged"}, {"review": None}, {"review": "suspected", "path": "../job.json"}):
+                self.assert_error(client.put(f"{endpoint}/event_0001", json=payload), 422, "invalid_request")
+            malformed = client.put(f"{endpoint}/event_0001", content=b"{", headers={"Content-Type": "application/json"})
+            self.assert_error(malformed, 422, "invalid_request")
+            for origin, status in (("http://127.0.0.1:5173", 200), ("https://example.org", 400)):
+                response = client.options(f"{endpoint}/event_0001", headers={
+                    "Origin": origin, "Access-Control-Request-Method": "PUT", "Access-Control-Request-Headers": "Content-Type",
+                })
+                self.assertEqual(response.status_code, status)
+                self.assertEqual("access-control-allow-origin" in response.headers, status == 200)
+            self.assertFalse((self.settings.jobs_root / job_id / "reviews.json").exists())
+
+    def test_reviews_reject_queued_running_and_failed_jobs(self):
+        entered, release = Event(), Event()
+
+        def fail(video, **options):
+            entered.set()
+            release.wait(5)
+            raise RuntimeError("analysis failed")
+
+        with self.client(fail) as client:
+            def assert_unavailable(job_id):
+                endpoint = f"/api/jobs/{job_id}/reviews"
+                self.assert_error(client.get(endpoint), 409, "results_not_ready")
+                self.assert_error(client.put(f"{endpoint}/event_0001", json={"review": "deferred"}), 409, "results_not_ready")
+
+            with self.assertLogs("src.road_anomaly.api.jobs", level="ERROR"):
+                running = self.upload(client)
+                try:
+                    self.assertTrue(entered.wait(5))
+                    queued = self.upload(client)
+                    self.assertEqual(client.get(f"/api/jobs/{queued}").json()["status"], "queued")
+                    assert_unavailable(running)
+                    assert_unavailable(queued)
+                finally:
+                    release.set()
+                self.wait(client, running, "failed")
+                self.wait(client, queued, "failed")
+            assert_unavailable(running)
+
+    def test_corrupt_reviews_cannot_be_overwritten(self):
+        with self.client() as client:
+            job_id = self.upload(client)
+            self.wait(client, job_id)
+            endpoint = f"/api/jobs/{job_id}/reviews"
+            path = self.settings.jobs_root / job_id / "reviews.json"
+            entry = {"event_id": "event_0001", "review": "suspected", "updated_at": "2026-11-26T00:00:00Z"}
+            for corrupt in (
+                b'{"reviews":', b"\xff",
+                json.dumps({"job_id": str(uuid4()), "reviews": []}).encode(),
+                json.dumps({"job_id": job_id, "reviews": [entry, entry]}).encode(),
+                json.dumps({"job_id": job_id, "reviews": [{**entry, "event_id": "event_9999"}]}).encode(),
+                json.dumps({"job_id": job_id, "reviews": [{**entry, "updated_at": "invalid"}]}).encode(),
+            ):
+                with self.subTest(corrupt=corrupt):
+                    path.write_bytes(corrupt)
+                    self.assert_error(client.get(endpoint), 500, "review_data_invalid")
+                    self.assert_error(client.put(f"{endpoint}/event_0001", json={"review": "deferred"}), 500, "review_data_invalid")
+                    self.assertEqual(path.read_bytes(), corrupt)
+
+    def test_review_read_and_atomic_replace_failures_preserve_file(self):
+        with self.client() as client:
+            job_id = self.upload(client)
+            self.wait(client, job_id)
+            endpoint = f"/api/jobs/{job_id}/reviews"
+            event_endpoint = f"{endpoint}/event_0001"
+            before = client.put(event_endpoint, json={"review": "suspected"}).json()
+            path = self.settings.jobs_root / job_id / "reviews.json"
+            original = path.read_bytes()
+            with self.assertLogs("src.road_anomaly.api.jobs", level="ERROR"):
+                with patch.object(Path, "read_bytes", side_effect=PermissionError):
+                    self.assert_error(client.get(endpoint), 500, "review_read_failed")
+                    self.assert_error(client.put(event_endpoint, json={"review": "deferred"}), 500, "review_read_failed")
+                with patch.object(Path, "replace", side_effect=PermissionError):
+                    self.assert_error(client.put(event_endpoint, json={"review": "deferred"}), 500, "review_save_failed")
+            self.assertEqual(path.read_bytes(), original)
+            self.assertEqual(list(path.parent.glob("*.tmp")), [])
+            self.assertEqual(client.get(endpoint).json()["reviews"], [before])
+
+    def test_review_file_redirect_is_rejected(self):
+        with self.client() as client:
+            job_id = self.upload(client)
+            self.wait(client, job_id)
+            endpoint = f"/api/jobs/{job_id}/reviews"
+            directory = self.settings.jobs_root / job_id
+            path, target = directory / "reviews.json", directory / "results.json"
+            original = target.read_bytes()
+            resolve = Path.resolve
+            with patch.object(Path, "resolve", lambda path_arg: target if path_arg == path else resolve(path_arg)):
+                self.assert_error(client.get(endpoint), 404, "not_found")
+                self.assert_error(client.put(f"{endpoint}/event_0001", json={"review": "deferred"}), 404, "not_found")
+            self.assertEqual(target.read_bytes(), original)
+            self.assertFalse(path.exists())
+
+    def test_concurrent_reviews_preserve_distinct_events(self):
+        self.multiple_events = True
+        with self.client() as client:
+            job_id = self.upload(client)
+            self.wait(client, job_id)
+            endpoint = f"/api/jobs/{job_id}/reviews"
+            started = Barrier(2, timeout=5)
+
+            def store(event_id, review):
+                started.wait()
+                return client.put(f"{endpoint}/{event_id}", json={"review": review})
+
+            with ThreadPoolExecutor(max_workers=2) as workers:
+                first = workers.submit(store, "event_0001", "suspected")
+                second = workers.submit(store, "event_0002", "deferred")
+                for response in (first.result(), second.result()):
+                    self.assertEqual(response.status_code, 200, response.text)
+            reviews = client.get(endpoint).json()["reviews"]
+            self.assertEqual({row["event_id"]: row["review"] for row in reviews},
+                             {"event_0001": "suspected", "event_0002": "deferred"})
 
     def test_redirected_paths_cannot_serve_other_jobs(self):
         with self.client() as client:

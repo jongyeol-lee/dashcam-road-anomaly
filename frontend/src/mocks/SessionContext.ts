@@ -1,6 +1,7 @@
 import { createContext, useContext } from 'react'
 import type { AnalysisResults, JobStatus } from '../api/types'
-import type { AnalysisPhase, ReviewState } from '../config/service'
+import type { ReviewState } from '../api/types'
+import type { AnalysisPhase } from '../config/service'
 
 export interface DemoJob {
   phase: AnalysisPhase

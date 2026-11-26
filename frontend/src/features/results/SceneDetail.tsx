@@ -1,12 +1,30 @@
 import type { Ref } from 'react'
 import { ChevronLeft, ChevronRight, List } from 'lucide-react'
-import type { Scene } from '../../api/types'
+import type { ReviewState, Scene } from '../../api/types'
 import { Button } from '../../components/ui'
-import { CLASS_LABELS, REVIEW_LABELS, type ReviewState } from '../../config/service'
+import { CLASS_LABELS, REVIEW_LABELS } from '../../config/service'
 import { ExpandableSceneImage } from './SceneImage'
 import { formatSceneTime } from './helpers'
+import type { ReviewChange } from './useJobReviews'
 
-export function SceneDetail({ event, imageSrc, example, headingRef, index, count, onNavigate, onReturnToList, review, onReview, onRetryImage }: {
+export function ReviewFeedback({ change, eventId, onRetry }: {
+  change: ReviewChange
+  eventId?: string
+  onRetry: () => void
+}) {
+  const scene = eventId ? `${eventId} · ` : ''
+  if (change.status === 'failed') return <div className="review-feedback">
+    <p role="alert">{scene}저장 실패 · {REVIEW_LABELS[change.review]} · {change.message}</p>
+    <Button type="button" variant="secondary" onClick={onRetry}>검토 저장 다시 시도</Button>
+  </div>
+  return <p className="review-feedback muted" role="status">
+    {scene}{change.status === 'saving' ? '저장 중' : '저장 완료'} · {REVIEW_LABELS[change.review]}
+  </p>
+}
+
+export function SceneDetail({
+  event, imageSrc, example, headingRef, index, count, onNavigate, onReturnToList, review, change, onReview, onRetryImage,
+}: {
   event: Scene
   imageSrc: string
   example: boolean
@@ -15,7 +33,8 @@ export function SceneDetail({ event, imageSrc, example, headingRef, index, count
   count: number
   onNavigate: (offset: number) => void
   onReturnToList: () => void
-  review: ReviewState
+  review?: ReviewState
+  change?: ReviewChange
   onReview: (review: ReviewState) => void
   onRetryImage: () => void
 }) {
@@ -42,6 +61,16 @@ export function SceneDetail({ event, imageSrc, example, headingRef, index, count
         <dl className="detail-metrics"><div><dt>구간 시작</dt><dd>{formatSceneTime(event.start_time_sec)}</dd></div><div><dt>마지막 탐지</dt><dd>{formatSceneTime(event.last_detection_time_sec)}</dd></div><div><dt>대표 시각</dt><dd>{time}</dd></div><div><dt>AI 예측 점수</dt><dd>{score} <span className="small muted">/ 1</span></dd></div><div><dt>탐지 박스</dt><dd>{event.detection_count}개</dd></div><div><dt>탐지 프레임</dt><dd>{event.detected_frame_count}장</dd></div></dl>
         <p className="score-note">AI 점수는 모델의 예측 점수이며, 파손 확률이나 위험 등급이 아닙니다.</p>
       </div></div>
-    <fieldset className="review-fieldset"><legend>이 장면을 어떻게 보셨나요?</legend><div className="review-options">{Object.entries(REVIEW_LABELS).map(([value, label]) => <label key={value} className={`review-option ${review === value ? 'checked' : ''}`}><input type="radio" name={`review-${event.event_id}`} value={value} checked={review === value} onChange={() => onReview(value as ReviewState)} />{label}</label>)}</div></fieldset>
+    <div className="review-controls">
+      <fieldset className="review-fieldset" disabled={review === undefined || change?.status === 'saving'}>
+        <legend>이 장면을 어떻게 보셨나요?</legend>
+        <div className="review-options">{Object.entries(REVIEW_LABELS).map(([value, label]) =>
+          <label key={value} className={`review-option ${review === value ? 'checked' : ''}`}>
+            <input type="radio" name={`review-${event.event_id}`} value={value} checked={review === value}
+              onChange={() => onReview(value as ReviewState)} />{label}
+          </label>)}</div>
+      </fieldset>
+      {change && <ReviewFeedback change={change} onRetry={() => onReview(change.review)} />}
+    </div>
   </section>
 }

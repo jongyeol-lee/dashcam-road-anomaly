@@ -1,6 +1,16 @@
-// schemas.py의 응답 모델을 기준으로 유지한다. 파일명·진행률·검토 상태는 API 필드가 아니다.
+// schemas.py의 응답 모델을 기준으로 유지한다. 분석 결과와 사용자 검토는 별도 API로 조회한다.
 export type JobState = 'queued' | 'running' | 'completed' | 'failed'
 export type ClassCode = 'D00' | 'D10' | 'D20' | 'D40'
+export type ReviewState = 'unreviewed' | 'suspected' | 'false_positive' | 'deferred'
+export interface SceneReview {
+  event_id: string
+  review: ReviewState
+  updated_at: string
+}
+export interface JobReviews {
+  job_id: string
+  reviews: SceneReview[]
+}
 export interface ApiError { code: string; message: string }
 export interface ErrorResponse { error: ApiError }
 export interface JobStatus {

@@ -2,10 +2,12 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, JsonValue
 
 
 JobState = Literal["queued", "running", "completed", "failed"]
+ReviewState = Literal["unreviewed", "suspected", "false_positive", "deferred"]
+EVENT_ID_PATTERN = r"^event_[0-9]{4,}$"
 
 
 class ResponseModel(BaseModel):
@@ -39,7 +41,7 @@ class VideoInfo(ResponseModel):
 
 
 class Scene(ResponseModel):
-    event_id: str = Field(pattern=r"^event_[0-9]{4,}$")
+    event_id: str = Field(pattern=EVENT_ID_PATTERN)
     class_id: int = Field(ge=0, le=3)
     class_name: Literal["D00", "D10", "D20", "D40"]
     start_time_sec: float = Field(ge=0)
@@ -69,3 +71,17 @@ class AnalysisResults(ResponseModel):
     settings: dict[str, JsonValue]
     timestamp_basis: str
     events: list[Scene]
+
+
+class ReviewUpdate(ResponseModel):
+    review: ReviewState
+
+
+class SceneReview(ReviewUpdate):
+    event_id: str = Field(pattern=EVENT_ID_PATTERN)
+    updated_at: AwareDatetime
+
+
+class JobReviews(ResponseModel):
+    job_id: UUID
+    reviews: list[SceneReview]

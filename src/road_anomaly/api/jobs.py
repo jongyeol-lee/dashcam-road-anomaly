@@ -18,7 +18,7 @@ from pydantic import ValidationError
 from ..rdd2022 import CLASSES
 from ..video import open_video_capture
 from ..video_analysis import MVP_SHA256, PROJECT_ROOT, analyze_video
-from .schemas import AnalysisResults, ApiError, JobStatus, Scene, VideoInfo
+from .schemas import AnalysisResults, ApiError, JobReviews, JobStatus, ReviewState, Scene, SceneReview, VideoInfo
 
 
 logger = logging.getLogger(__name__)
@@ -256,6 +256,53 @@ class JobManager:
             raise JobError(404, "not_found", "대표 이미지를 찾을 수 없습니다.")
         # JSON에 있는 임의 경로를 제공하지 않고 검증한 ID로 경로를 구성한다.
         return contained_path(self.settings.analysis_root, str(job_id), "scenes", f"{event_id}.jpg")
+
+    def _read_reviews(self, path: Path, job_id: UUID, event_ids: set[str]) -> JobReviews:
+        try:
+            stored = JobReviews.model_validate_json(path.read_bytes())
+            reviewed_ids = {entry.event_id for entry in stored.reviews}
+            if stored.job_id != job_id or len(reviewed_ids) != len(stored.reviews) or not reviewed_ids <= event_ids:
+                raise ValueError("Inconsistent review data")
+        except FileNotFoundError:
+            # 이전 완료 작업은 첫 저장 요청 전까지 검토 파일이 없다.
+            return JobReviews(job_id=job_id, reviews=[])
+        except ValueError as error:
+            raise JobError(500, "review_data_invalid", "저장된 검토 데이터를 확인할 수 없습니다.") from error
+        except OSError as error:
+            logger.exception("검토 파일 읽기 실패: %s", job_id)
+            raise JobError(500, "review_read_failed", "검토 데이터를 읽을 수 없습니다.") from error
+        return stored
+
+    def _review_event_ids(self, job_id: UUID) -> set[str]:
+        results = self.results(job_id)
+        if results.job_id != job_id:
+            raise JobError(500, "internal_error", "작업의 분석 결과를 확인할 수 없습니다.")
+        return {event.event_id for event in results.events}
+
+    def reviews(self, job_id: UUID) -> JobReviews:
+        with self._lock:
+            event_ids = self._review_event_ids(job_id)
+            path = contained_path(self.settings.jobs_root, str(job_id), "reviews.json")
+            return self._read_reviews(path, job_id, event_ids)
+
+    def set_review(self, job_id: UUID, event_id: str, review: ReviewState) -> SceneReview:
+        # 한 잠금 안에서 읽기부터 파일 교체까지 마쳐 다른 장면의 변경을 보존한다.
+        with self._lock:
+            event_ids = self._review_event_ids(job_id)
+            if event_id not in event_ids:
+                raise JobError(404, "not_found", "검토할 장면을 찾을 수 없습니다.")
+            path = contained_path(self.settings.jobs_root, str(job_id), "reviews.json")
+            stored = self._read_reviews(path, job_id, event_ids)
+            entry = SceneReview(event_id=event_id, review=review, updated_at=datetime.now(UTC))
+            by_event = {item.event_id: item for item in stored.reviews}
+            by_event[event_id] = entry
+            stored.reviews = sorted(by_event.values(), key=lambda item: item.event_id)
+            try:
+                write_json_atomic(path, stored.model_dump(mode="json"))
+            except OSError as error:
+                logger.exception("검토 파일 저장 실패: %s", job_id)
+                raise JobError(500, "review_save_failed", "검토 결과를 저장할 수 없습니다.") from error
+            return entry
 
     def _load_results(self, job_id: UUID, *, verify_files: bool) -> AnalysisResults:
         directory = contained_path(self.settings.analysis_root, str(job_id))

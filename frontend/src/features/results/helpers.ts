@@ -1,4 +1,5 @@
-import type { ClassCode, Scene } from '../../api/types'
+import type { ClassCode, ReviewState, Scene } from '../../api/types'
+import type { ReviewValues } from './useJobReviews'
 
 export function formatTime(seconds: number | null): string {
   if (seconds === null || !Number.isFinite(seconds) || seconds < 0) return '시간 정보 없음'
@@ -25,9 +26,11 @@ export function timelinePosition(time: number, duration: number | null): number 
   return time / duration * 100
 }
 
-export function visibleScenes(events: Scene[], filter: ClassCode | 'all', sort: 'time' | 'score', unreviewedOnly: boolean, reviews: Record<string, string>): Scene[] {
+export function visibleScenes(
+  events: Scene[], filter: ClassCode | 'all', sort: 'time' | 'score', reviewFilter: ReviewState | 'all', reviews?: ReviewValues,
+): Scene[] {
   return events.filter(event => (filter === 'all' || event.class_name === filter)
-    && (!unreviewedOnly || !reviews[event.event_id] || reviews[event.event_id] === 'unreviewed'))
+    && (reviewFilter === 'all' || (reviews !== undefined && (reviews[event.event_id] ?? 'unreviewed') === reviewFilter)))
     .sort((a, b) => (sort === 'score' ? b.max_confidence - a.max_confidence : 0)
       || a.representative_time_sec - b.representative_time_sec || a.event_id.localeCompare(b.event_id))
 }

@@ -103,7 +103,7 @@
   .file-summary strong { font-size: .9375rem; }
   .job-id { overflow-wrap: anywhere; font-size: .875rem; }
   .job-id summary { width: fit-content; cursor: pointer; }
-  .stage-list { display: grid; grid-template-columns: repeat(4, 1fr); padding: 0; margin: 28px 0; list-style: none; font-size: .875rem; gap: 8px; color: var(--color-muted); }
+  .stage-list { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); padding: 0; margin: 28px 0; list-style: none; font-size: .875rem; gap: 8px; color: var(--color-muted); }
   .stage-list li { display: flex; flex-direction: column; align-items: center; gap: 8px; }
   .stage-list li > span { border: 1px solid var(--color-line); background: #f4f7fa; width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; }
   .stage-list li.current { color: var(--color-primary); font-weight: 700; }
@@ -185,21 +185,29 @@
   .detail-metrics dt { color: var(--color-muted); font-size: .8125rem; }
   .detail-metrics dd { margin: 2px 0 0; font-size: .9375rem; font-weight: 650; font-variant-numeric: tabular-nums; }
   .score-note { color: var(--color-muted); font-size: .8125rem; }
-  .review-fieldset { padding: 0 20px 20px; margin: 0; border: 0; }
+  .review-controls { padding: 0 20px 20px; }
+  .review-fieldset { padding: 0; margin: 0; border: 0; min-width: 0; }
   .review-fieldset legend { font-size: .875rem; font-weight: 600; margin-bottom: 12px; }
   .review-options { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
   .review-option { display: flex; justify-content: center; align-items: center; gap: 7px; border: 1px solid var(--color-line); border-radius: 7px; padding: 10px 5px; font-size: .875rem; cursor: pointer; }
   .review-option.checked { border-color: var(--color-primary); background: #eef4f9; color: var(--color-primary); font-weight: 600; }
+  .review-fieldset:disabled .review-option { cursor: default; }
+  .review-feedback { margin: 10px 0 0; font-size: .875rem; }
+  .review-feedback [role="alert"], .review-progress [role="alert"] { color: #a12823; }
+  .review-feedback .button { margin-top: 6px; }
   .scene-sidebar { min-width: 0; }
   .scene-list-heading { padding: 20px 20px 0; }
   .count-pill { display: inline-grid; place-items: center; background: #eaf0f6; border-radius: 5px; color: var(--color-primary); font-size: .8125rem; margin-left: 4px; min-width: 23px; padding: 1px 6px; }
-  .review-progress { display: flex; justify-content: space-between; align-items: center; gap: 10px; background: #f2f6f9; border-radius: 6px; padding: 10px 12px; margin: 16px 0; font-size: .875rem; }
+  .review-progress { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; background: #f2f6f9; border-radius: 6px; padding: 10px 12px; margin: 16px 0 10px; font-size: .875rem; }
   .review-progress > span { display: flex; align-items: center; gap: 7px; }
   .review-progress strong { font-variant-numeric: tabular-nums; color: var(--color-primary); }
+  .review-totals { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 14px; margin: 0 0 14px; font-size: .8125rem; }
+  .review-totals div { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 0 4px; }
+  .review-totals dd { margin: 0; font-weight: 600; font-variant-numeric: tabular-nums; }
   .list-controls { display: grid; grid-template-columns: 1fr 1.3fr; gap: 10px; }
   .list-controls label { font-size: .875rem; color: var(--color-muted); min-width: 0; }
   .list-controls select { width: 100%; margin-top: 5px; padding-left: 8px; }
-  .checkbox-label { display: flex; align-items: center; gap: 8px; margin-top: 13px; font-size: .875rem; }
+  .review-filter { grid-column: 1 / -1; }
   .list-result-count { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 5px; padding: 16px 0 12px; font-size: .875rem; color: var(--color-muted); }
   .scene-list { max-height: 640px; overflow-y: auto; overscroll-behavior-y: contain; scrollbar-width: thin; padding: 0 12px 12px; }
   .scene-row { display: flex; align-items: center; width: 100%; gap: 12px; padding: 12px 10px; margin-bottom: 5px; border: 1px solid transparent; border-radius: 8px; text-align: left; background: white; }
@@ -295,7 +303,7 @@
   .scene-navigation .button { padding-inline: 9px; }
   .detail-body { grid-template-columns: 1fr; padding: 16px; gap: 16px; }
   .detail-metrics { gap: 12px 20px; }
-  .review-fieldset { padding: 0 16px 16px; }
+  .review-controls { padding: 0 16px 16px; }
   .review-options { grid-template-columns: 1fr 1fr; }
   .scene-list-heading { padding: 18px 16px 0; }
   .scene-thumbnail { width: clamp(74px, 25vw, 95px); }

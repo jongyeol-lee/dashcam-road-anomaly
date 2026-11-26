@@ -4,7 +4,7 @@
 
 ## 주요 사용자 흐름
 
-MP4 입력 → 프레임 추출 → YOLO 추론 → 클래스별 시간 기준 통합 → 의심 장면 및 타임스탬프 추출 → 사용자 확인
+MP4 입력 → 프레임 추출 → YOLO 추론 → 클래스별 시간 기준 통합 → 의심 장면 및 타임스탬프 추출 → 사용자 검토 저장
 
 ## 기술 스택과 개발환경
 
@@ -37,7 +37,7 @@ MP4 입력 → 프레임 추출 → YOLO 추론 → 클래스별 시간 기준 �
 
 ## 현재 구현 상태
 
-Windows x64의 프로젝트 가상환경에서 CUDA와 torchvision NMS를 검증하고, RDD2022 Czech 데이터 변환과 YOLO11n Baseline 학습·Validation 평가를 완료했습니다. MP4 분석 CLI와 Python 함수는 Czech Baseline과 Czech + Japan 혼합 모델을 지원합니다. 혼합 모델의 MVP 프로필로 실제 전·후방 영상 두 편에서 0.5초마다 추출한 141장 모두를 추론하고 대표 장면 22개를 원본 프레임과 대조했습니다. Part 6.1에서는 FastAPI 업로드·상태·결과·영상·대표 이미지 API를 구현하고 실제 전방 MP4의 CUDA 분석을 검증했습니다. React 화면과 웹 통합은 Part 6.2~6.3에서 구현합니다. [실제 MP4 검증](docs/experiments/part5_mvp_video_pipeline.md) · [백엔드 검증](docs/experiments/part6_fastapi_backend.md)
+Windows x64의 프로젝트 가상환경에서 CUDA와 torchvision NMS를 검증하고, RDD2022 Czech 데이터 변환과 YOLO11n Baseline 학습·Validation 평가를 완료했습니다. MP4 분석 CLI와 Python 함수는 Czech Baseline과 Czech + Japan 혼합 모델을 지원합니다. 혼합 모델의 MVP 프로필로 실제 전·후방 영상 두 편에서 0.5초마다 추출한 141장 모두를 추론하고 대표 장면 22개를 원본 프레임과 대조했습니다. 웹에서는 React로 MP4를 업로드하고 FastAPI 분석 상태, 원본 영상, 대표 장면을 확인할 수 있습니다. Part 6.3-2B-2부터 장면을 검토하면 서버에 저장되며 같은 작업에 다시 접속할 때 복원됩니다. [실제 MP4 검증](docs/experiments/part5_mvp_video_pipeline.md) · [웹 통합 검증](docs/experiments/part6_service_integration_validation.md) · [검토 저장 검증](docs/experiments/part6_review_persistence.md)
 
 | 경로 | 용도 |
 | --- | --- |
@@ -164,6 +164,7 @@ curl.exe --silent --range 0-1023 --dump-header - --output NUL "$api/api/jobs/$jo
 | --- | --- |
 | `data/raw/uploads/<job_id>/input.mp4` | 업로드한 영상 사본 |
 | `outputs/jobs/<job_id>/job.json`, `results.json` | 원자적으로 저장하는 상태와 프론트엔드용 결과 |
+| `outputs/jobs/<job_id>/reviews.json` | 완료 작업에서 장면별로 저장한 사용자 검토와 마지막 수정 시각 |
 | `data/processed/frames/jobs/<job_id>/` | 샘플링 프레임과 CSV |
 | `outputs/video_analysis/jobs/<job_id>/` | 기존 형식의 summary·detections·events·scenes |
 
@@ -173,4 +174,4 @@ curl.exe --silent --range 0-1023 --dump-header - --output NUL "$api/api/jobs/$jo
 
 단일 큐의 동기 분석을 별도 스레드 1개가 수행하며 같은 저장소의 중복 API 프로세스는 잠금으로 차단합니다. 상태는 `queued → running → completed/failed`이고 가짜 진행률을 제공하지 않습니다. 재시작 시 완료 결과는 유지하고 남아 있던 queued/running은 failed(`interrupted`)로 바꿉니다. 정상 종료는 현재 추론을 기다리며 대기 작업은 중단 처리합니다. 자동 재실행·취소·파일 보존 기간·삭제 API는 이번 범위에 없습니다.
 
-CORS는 `http://localhost:5173`, `http://127.0.0.1:5173`만 허용합니다. 인증이 없는 로컬 단일 사용자 MVP이며 외부 인터넷에 공개하지 않습니다. 임시 Ultralytics·Matplotlib 설정과 오프라인·자동 설치 금지를 유지합니다. React UI와 브라우저 재생·타임스탬프 이동은 Part 6.2~6.3에서 별도로 검증합니다.
+CORS는 `http://localhost:5173`, `http://127.0.0.1:5173`만 허용합니다. 인증이 없는 로컬 단일 사용자 MVP이며 외부 인터넷에 공개하지 않습니다. 임시 Ultralytics·Matplotlib 설정과 오프라인·자동 설치 금지를 유지합니다. [React 실행과 테스트](frontend/README.md)

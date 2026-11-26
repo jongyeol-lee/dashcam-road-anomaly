@@ -1,6 +1,6 @@
-# Part 6.1 API Contract
+# 로컬 분석 API 계약
 
-2026-11-25 · 로컬 단일 사용자 MVP · 기본 주소 `http://127.0.0.1:8000`. 현재 응답의 정확한 타입과 필수 필드는 `/openapi.json` 및 [Pydantic 모델](../src/road_anomaly/api/schemas.py)에서 확인합니다. React + Vite의 기본 origin은 `http://localhost:5173` 또는 `http://127.0.0.1:5173`입니다. 인증과 사용자별 격리는 없습니다.
+2026-11-26 · 로컬 단일 사용자 MVP · 기본 주소 `http://127.0.0.1:8000`. 현재 응답의 정확한 타입과 필수 필드는 `/openapi.json`에서 확인할 수 있습니다. React + Vite의 기본 origin은 `http://localhost:5173` 또는 `http://127.0.0.1:5173`입니다. 인증과 사용자별 격리는 없습니다. [Pydantic 모델](../src/road_anomaly/api/schemas.py)
 
 ## 엔드포인트
 
@@ -10,6 +10,8 @@
 | POST | `/api/jobs` | 202 JobStatus | MP4 검증·저장 후 작업 생성 |
 | GET | `/api/jobs/{job_id}` | 200 JobStatus | 상태와 시각·실패 정보 |
 | GET | `/api/jobs/{job_id}/results` | 200 AnalysisResults | 완료 결과 |
+| GET | `/api/jobs/{job_id}/reviews` | 200 JobReviews | 완료 작업의 저장된 검토 결과 |
+| PUT | `/api/jobs/{job_id}/reviews/{event_id}` | 200 SceneReview | 완료 작업의 장면 한 건 저장 |
 | GET / HEAD | `/api/jobs/{job_id}/video` | 200 또는 206 | 업로드 사본 MP4 및 Range 응답 |
 | GET | `/api/jobs/{job_id}/scenes/{event_id}` | 200 image/jpeg | 작업의 대표 이미지 |
 
@@ -107,6 +109,25 @@ const job = await response.json();
 
 같은 클래스·최대 인접 간격 1.5초로 묶되 구간 시작부터 5초를 넘는 다음 탐지는 새 구간으로 나눕니다. 같은 시각의 박스는 함께 두고 대표는 최고 confidence, 동점은 기존 정렬의 첫 박스입니다. 객체 추적을 하지 않으므로 다른 위치의 파손이 한 구간에 들거나 같은 대상이 여러 구간에 들 수 있습니다.
 
+## 사용자 검토 결과
+
+`GET /api/jobs/{job_id}/reviews`는 작업 UUID와 저장된 장면 검토 배열을 반환합니다. 검토 파일이 없는 기존 완료 작업 또는 무탐지 작업은 `reviews: []`로 응답합니다. 조회에 성공한 뒤 배열에 없는 장면을 미검토로 표시할 수 있습니다. 한 번이라도 저장한 장면에는 마지막 수정 시각이 UTC ISO 8601로 포함됩니다.
+
+```json
+{
+  "job_id": "d54ca2ea-e702-46d5-a063-ef15286866ec",
+  "reviews": [
+    { "event_id": "event_0001", "review": "suspected", "updated_at": "2026-11-26T00:00:00Z" }
+  ]
+}
+```
+
+`PUT /api/jobs/{job_id}/reviews/{event_id}`는 `Content-Type: application/json`과 본문 `{"review":"suspected"}`를 받습니다. 허용 값은 `unreviewed`(미검토), `suspected`(파손 의심), `false_positive`(오탐), `deferred`(판단 보류)입니다. 성공 응답은 저장한 배열 항목과 같은 `{event_id, review, updated_at}` 구조입니다. `unreviewed`로 되돌린 항목에도 수정 시각이 남습니다.
+
+완료된 작업의 실제 장면만 변경할 수 있습니다. 기존 단일 워커와 잠금을 사용해 현재 기록을 읽고 대상 장면을 갱신한 뒤 `outputs/jobs/<job_id>/reviews.json`을 원자적으로 교체합니다. 같은 장면에 여러 요청이 들어오면 서버에서 마지막으로 저장에 성공한 요청의 값이 남습니다. 다른 장면의 변경은 함께 보존됩니다. 파일을 읽을 수 없거나 데이터가 손상되면 오류를 반환하고 기존 파일을 보존합니다. 기본 CORS 허용 origin에서 JSON PUT을 사용할 수 있습니다.
+
+검토는 사용자 의견이며 AI 예측은 `/results`에 계속 보관됩니다. 검토 저장에는 GPU 분석이 필요하지 않습니다. 검토 조회 오류가 나도 기존 영상·분석 결과·대표 JPEG를 이용할 수 있습니다. [구현과 검증](experiments/part6_review_persistence.md)
+
 ## 영상과 이미지 사용
 
 상대 URL은 API의 origin에 결합합니다. `new URL(result.video_url, apiBase)`를 video src로, `new URL(event.image_url, apiBase)`를 img src로 사용합니다. 비디오의 `loadedmetadata` 이후 `video.currentTime = event.representative_time_sec`로 이동할 수 있습니다. 실제 브라우저 코덱 재생과 타임스탬프 이동은 Part 6.2~6.3 검증 대상입니다. 가변 FPS 영상의 추정 시각 오차도 남습니다.
@@ -138,12 +159,15 @@ Content-Length: 1024
 | --- | --- | --- |
 | 400 | `invalid_request` | multipart 오류, 추가 필드·파일, 잘못된 Range |
 | 404 | `not_found` | 없는 작업·구간·파일, 허용되지 않는 경로 |
-| 409 | `results_not_ready` | queued/running/failed 작업의 결과 또는 이미지 조회 |
+| 409 | `results_not_ready` | queued/running/failed 작업의 결과·이미지·검토 조회 또는 검토 저장 |
 | 413 | `upload_too_large` | 파일 또는 전체 요청 크기 초과 |
 | 415 | `unsupported_file_type` | MP4 확장자 아님 |
-| 422 | `invalid_request` / `empty_file` / `invalid_video` | 잘못된 UUID·event_id, 필수 파일 누락, 빈 파일, 디코딩 실패 |
+| 422 | `invalid_request` / `empty_file` / `invalid_video` | 잘못된 UUID·event_id·검토 요청, 필수 파일 누락, 빈 파일, 디코딩 실패 |
 | 416 | `invalid_range` | 영상 파일 범위 밖 Range |
 | 500 | `internal_error` | 저장·조회 중 서버 오류. 상세는 로컬 로그 |
+| 500 | `review_data_invalid` | 검토 JSON이 깨졌거나 작업·장면·스키마가 일치하지 않음 |
+| 500 | `review_read_failed` | 검토 파일 읽기 실패 |
+| 500 | `review_save_failed` | 검토 파일 쓰기 또는 교체 실패 |
 | 503 | `shutting_down` | 종료 중 새 작업 등록 |
 
 분석 중 예외는 업로드 응답을 바꾸지 않습니다. 상태 조회가 HTTP 200, `status: failed`, `error.code: analysis_failed`를 반환하고 다음 대기 작업은 계속 실행합니다. [동작·검증 보고서](experiments/part6_fastapi_backend.md)

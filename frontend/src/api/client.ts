@@ -1,5 +1,5 @@
-import { API_BASE, CLASS_LABELS } from '../config/service'
-import type { AnalysisResults, ErrorResponse, JobStatus, Scene } from './types'
+import { API_BASE, CLASS_LABELS, REVIEW_LABELS } from '../config/service'
+import type { AnalysisResults, ErrorResponse, JobReviews, JobStatus, ReviewState, Scene, SceneReview } from './types'
 
 const errorMessages: Record<string, string> = {
   invalid_request: '요청 정보를 확인해 주세요.',
@@ -12,6 +12,9 @@ const errorMessages: Record<string, string> = {
   analysis_failed: '영상 분석 중 오류가 발생했습니다. 다른 영상으로 다시 시도해 주세요.',
   interrupted: '서버 종료로 분석이 중단됐습니다. 영상을 다시 업로드해 주세요.',
   shutting_down: '서버가 종료 중입니다. 연결을 확인한 뒤 다시 시도해 주세요.',
+  review_data_invalid: '저장된 검토 데이터를 확인할 수 없습니다.',
+  review_read_failed: '검토 데이터를 읽을 수 없습니다.',
+  review_save_failed: '서버가 검토 결과를 저장하지 못했습니다.',
   internal_error: '서버 처리 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.',
 }
 
@@ -66,13 +69,29 @@ function isMediaPath(value: unknown): value is string {
     && new URL(value, API_BASE).origin === new URL(API_BASE).origin
 }
 
+function isEventId(value: unknown): value is string {
+  return typeof value === 'string' && /^event_[0-9]{4,}$/.test(value)
+}
+
 function isScene(value: unknown): value is Scene {
-  return isRecord(value) && typeof value.event_id === 'string' && /^event_[0-9]{4,}$/.test(value.event_id)
+  return isRecord(value) && isEventId(value.event_id)
     && typeof value.class_name === 'string' && Object.hasOwn(CLASS_LABELS, value.class_name)
     && [value.class_id, value.start_time_sec, value.last_detection_time_sec, value.representative_time_sec,
       value.representative_frame_index, value.max_confidence, value.detection_count, value.detected_frame_count].every(isNumber)
     && Array.isArray(value.representative_xyxy) && value.representative_xyxy.length === 4
     && value.representative_xyxy.every(isNumber) && isMediaPath(value.image_url)
+}
+
+function isSceneReview(value: unknown): value is SceneReview {
+  return isRecord(value) && isEventId(value.event_id)
+    && typeof value.review === 'string' && Object.hasOwn(REVIEW_LABELS, value.review)
+    && typeof value.updated_at === 'string' && Number.isFinite(Date.parse(value.updated_at))
+}
+
+function isJobReviews(value: unknown, jobId: string): value is JobReviews {
+  if (!isRecord(value) || value.job_id !== jobId.toLowerCase()
+    || !Array.isArray(value.reviews) || !value.reviews.every(isSceneReview)) return false
+  return new Set(value.reviews.map(entry => entry.event_id)).size === value.reviews.length
 }
 
 function isResults(value: unknown, jobId: string): value is AnalysisResults {
@@ -140,4 +159,15 @@ export function getJob(jobId: string, signal: AbortSignal) {
 export function getResults(jobId: string, signal: AbortSignal) {
   return request(`/api/jobs/${encodeURIComponent(jobId)}/results`, { signal, cache: 'no-store' }, 200,
     (value): value is AnalysisResults => isResults(value, jobId))
+}
+
+export function getReviews(jobId: string, signal: AbortSignal) {
+  return request(`/api/jobs/${encodeURIComponent(jobId)}/reviews`, { signal, cache: 'no-store' }, 200,
+    (value): value is JobReviews => isJobReviews(value, jobId))
+}
+
+export function saveReview(jobId: string, eventId: string, review: ReviewState) {
+  return request(`/api/jobs/${encodeURIComponent(jobId)}/reviews/${encodeURIComponent(eventId)}`,
+    { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ review }) }, 200,
+    (value): value is SceneReview => isSceneReview(value) && value.event_id === eventId && value.review === review)
 }

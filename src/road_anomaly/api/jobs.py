@@ -2,11 +2,13 @@ import csv
 import json
 import logging
 import os
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from queue import Queue
+from stat import S_ISREG
 from tempfile import NamedTemporaryFile
 from threading import Event, RLock, Thread
 from uuid import UUID
@@ -18,7 +20,10 @@ from pydantic import ValidationError
 from ..rdd2022 import CLASSES
 from ..video import open_video_capture
 from ..video_analysis import MVP_SHA256, PROJECT_ROOT, analyze_video
-from .schemas import AnalysisResults, ApiError, JobReviews, JobStatus, ReviewState, Scene, SceneReview, VideoInfo
+from .schemas import (
+    AnalysisResults, ApiError, JobAnalysisSummary, JobHistory, JobHistoryItem, JobHistoryQuery, JobHistoryWarning,
+    JobReviews, ReviewState, ReviewSummary, Scene, SceneReview, StoredJob, VideoInfo,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -87,6 +92,11 @@ def write_json_atomic(path: Path, data: dict) -> None:
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
+
+
+def history_warning(job_id: UUID, code: str, message: str) -> JobHistoryWarning:
+    logger.warning("분석 이력 조회 경고 (%s): %s", code, job_id)
+    return JobHistoryWarning(job_id=job_id, error=ApiError(code=code, message=message))
 
 
 def validate_upload(path: Path) -> None:
@@ -173,28 +183,113 @@ class JobManager:
     def _job_path(self, job_id: UUID) -> Path:
         return contained_path(self.settings.jobs_root, str(job_id), "job.json")
 
-    def get(self, job_id: UUID) -> JobStatus:
+    def get(self, job_id: UUID) -> StoredJob:
         with self._lock:
             path = self._job_path(job_id)
             if not path.is_file():
                 raise JobError(404, "not_found", "작업을 찾을 수 없습니다.")
-            return JobStatus.model_validate_json(path.read_text(encoding="utf-8"))
+            return StoredJob.model_validate_json(path.read_text(encoding="utf-8"))
 
-    def submit(self, job_id: UUID) -> JobStatus:
+    def submit(self, job_id: UUID, *, original_filename: str | None = None,
+               file_size_bytes: int | None = None) -> StoredJob:
         with self._lock:
             if self._stopping.is_set():
                 raise JobError(503, "shutting_down", "서버가 종료 중입니다.")
-            job = JobStatus(job_id=job_id, status="queued", created_at=datetime.now(UTC))
+            job = StoredJob(job_id=job_id, status="queued", created_at=datetime.now(UTC),
+                            original_filename=original_filename, file_size_bytes=file_size_bytes)
             path = self._job_path(job_id)
             path.parent.mkdir(parents=True)
-            write_json_atomic(path, job.model_dump(mode="json"))
+            try:
+                write_json_atomic(path, job.to_storage())
+            except Exception:
+                path.unlink(missing_ok=True)
+                path.parent.rmdir()
+                raise
             self._queue.put(job_id)
             return job
+
+    def list_history(self, query: JobHistoryQuery) -> JobHistory:
+        matches = []
+        warnings = []
+        search = (query.search or "").strip().casefold()
+        for directory in self.settings.jobs_root.iterdir():
+            try:
+                job_id = UUID(directory.name)
+            except ValueError:
+                continue
+            if directory.name != str(job_id):
+                continue
+            try:
+                job = self.get(job_id)
+                if job.job_id != job_id:
+                    raise ValueError("Inconsistent stored job ID")
+            except (OSError, ValueError, JobError):
+                warnings.append(history_warning(job_id, "job_data_unavailable", "저장된 작업 정보를 확인할 수 없습니다."))
+                continue
+            if query.status is not None and job.status != query.status:
+                continue
+            if search and search not in (job.original_filename or "").casefold():
+                continue
+            matches.append(job)
+
+        # 오래된 타임스탬프에 시간대가 없으면 기존 서버 저장 기준인 UTC로 비교한다.
+        matches.sort(key=lambda job: (job.created_at if job.created_at.tzinfo else job.created_at.replace(tzinfo=UTC),
+                                      job.job_id), reverse=query.sort == "newest")
+        items = [self._history_item(job, warnings) for job in matches[query.offset:query.offset + query.limit]]
+        return JobHistory(items=items, total=len(matches), count=len(items), limit=query.limit, offset=query.offset,
+                          warnings=warnings)
+
+    def _history_item(self, job: StoredJob, warnings: list[JobHistoryWarning]) -> JobHistoryItem:
+        item = JobHistoryItem(**job.model_dump())
+        job_id = job.job_id
+        if item.file_size_bytes is None:
+            try:
+                upload = self.video_path(job_id).stat()
+                if not S_ISREG(upload.st_mode):
+                    raise ValueError("Stored upload is not a regular file")
+                item.file_size_bytes = upload.st_size
+            except FileNotFoundError:
+                pass
+            except (JobError, OSError, ValueError):
+                warnings.append(history_warning(job_id, "upload_size_unavailable", "업로드 파일 크기를 확인할 수 없습니다."))
+        if job.status != "completed":
+            return item
+
+        # 완료 상태를 저장하기 전에 results.json을 게시한다. 완료된 결과는 바뀌지 않는다.
+        try:
+            results = self._read_results(job_id)
+            event_ids = {scene.event_id for scene in results.events}
+            if results.job_id != job_id or results.event_count != len(results.events) or len(event_ids) != len(results.events):
+                raise ValueError("Inconsistent stored results")
+        except (OSError, ValueError, JobError):
+            warnings.append(history_warning(job_id, "results_unavailable", "저장된 분석 결과를 확인할 수 없습니다."))
+            return item
+        item.analysis = JobAnalysisSummary(video=results.video, event_count=results.event_count,
+                                           analysis_seconds=results.analysis_seconds)
+
+        # Windows에서 검토 파일 읽기와 원자적 교체가 충돌하지 않도록 한 작업씩 잠근다.
+        try:
+            with self._lock:
+                path = self._reviews_path(job_id)
+                reviews = self._read_reviews(path, job_id, event_ids)
+        except JobError as error:
+            code = "review_read_failed" if error.error.code == "review_read_failed" else "review_data_invalid"
+            warnings.append(history_warning(job_id, code, "저장된 검토 데이터를 확인할 수 없습니다."))
+            return item
+        except (OSError, ValueError):
+            warnings.append(history_warning(job_id, "review_read_failed", "검토 데이터를 읽을 수 없습니다."))
+            return item
+        counts = Counter(entry.review for entry in reviews.reviews)
+        reviewed = counts["suspected"] + counts["false_positive"] + counts["deferred"]
+        item.reviews = ReviewSummary(unreviewed=len(event_ids) - reviewed, suspected=counts["suspected"],
+                                     false_positive=counts["false_positive"], deferred=counts["deferred"],
+                                     reviewed_count=reviewed)
+        return item
 
     def _update(self, job_id: UUID, **changes) -> None:
         with self._lock:
             job = self.get(job_id).model_copy(update=changes)
-            write_json_atomic(self._job_path(job_id), job.model_dump(mode="json"))
+            write_json_atomic(self._job_path(job_id), job.to_storage())
 
     def _recover_interrupted(self) -> None:
         for directory in self.settings.jobs_root.iterdir():
@@ -245,10 +340,13 @@ class JobManager:
     def _results_path(self, job_id: UUID) -> Path:
         return contained_path(self.settings.jobs_root, str(job_id), "results.json")
 
+    def _read_results(self, job_id: UUID) -> AnalysisResults:
+        return AnalysisResults.model_validate_json(self._results_path(job_id).read_text(encoding="utf-8"))
+
     def results(self, job_id: UUID) -> AnalysisResults:
         if self.get(job_id).status != "completed":
             raise JobError(409, "results_not_ready", "완료된 작업의 결과만 조회할 수 있습니다.")
-        return AnalysisResults.model_validate_json(self._results_path(job_id).read_text(encoding="utf-8"))
+        return self._read_results(job_id)
 
     def scene_path(self, job_id: UUID, event_id: str) -> Path:
         results = self.results(job_id)
@@ -256,6 +354,9 @@ class JobManager:
             raise JobError(404, "not_found", "대표 이미지를 찾을 수 없습니다.")
         # JSON에 있는 임의 경로를 제공하지 않고 검증한 ID로 경로를 구성한다.
         return contained_path(self.settings.analysis_root, str(job_id), "scenes", f"{event_id}.jpg")
+
+    def _reviews_path(self, job_id: UUID) -> Path:
+        return contained_path(self.settings.jobs_root, str(job_id), "reviews.json")
 
     def _read_reviews(self, path: Path, job_id: UUID, event_ids: set[str]) -> JobReviews:
         try:
@@ -282,7 +383,7 @@ class JobManager:
     def reviews(self, job_id: UUID) -> JobReviews:
         with self._lock:
             event_ids = self._review_event_ids(job_id)
-            path = contained_path(self.settings.jobs_root, str(job_id), "reviews.json")
+            path = self._reviews_path(job_id)
             return self._read_reviews(path, job_id, event_ids)
 
     def set_review(self, job_id: UUID, event_id: str, review: ReviewState) -> SceneReview:
@@ -291,7 +392,7 @@ class JobManager:
             event_ids = self._review_event_ids(job_id)
             if event_id not in event_ids:
                 raise JobError(404, "not_found", "검토할 장면을 찾을 수 없습니다.")
-            path = contained_path(self.settings.jobs_root, str(job_id), "reviews.json")
+            path = self._reviews_path(job_id)
             stored = self._read_reviews(path, job_id, event_ids)
             entry = SceneReview(event_id=event_id, review=review, updated_at=datetime.now(UTC))
             by_event = {item.event_id: item for item in stored.reviews}

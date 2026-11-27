@@ -556,6 +556,7 @@ test('저장 중 페이지 이탈 후 재접속과 새로고침에서 작업별 
   await reviewRadio(page, '파손 의심').click()
   await expect(page.getByText('저장 중 · 파손 의심')).toBeVisible()
   await page.getByRole('link', { name: '새 영상 분석' }).click()
+  await expect(heading(page, '영상 분석 결과')).toHaveCount(0)
   await page.goBack()
   await expect(page).toHaveURL(resultPath)
   await expect(page.getByText('검토 결과를 불러오고 있습니다.')).toBeVisible()

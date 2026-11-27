@@ -1,13 +1,27 @@
+import re
+import unicodedata
 from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, JsonValue
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, JsonValue, field_validator
 
 
 JobState = Literal["queued", "running", "completed", "failed"]
 ReviewState = Literal["unreviewed", "suspected", "false_positive", "deferred"]
 EVENT_ID_PATTERN = r"^event_[0-9]{4,}$"
+MAX_FILENAME_LENGTH = 255
+
+
+def normalize_upload_filename(filename: str) -> str:
+    """Windows와 POSIX 경로를 제거하고 화면에 표시할 이름만 남긴다."""
+    leaf = filename.replace("\\", "/").rsplit("/", 1)[-1]
+    name = "".join(char for char in leaf if unicodedata.category(char) not in {"Cc", "Cf", "Cs"}).strip()
+    name = re.sub(r"^(?:[A-Za-z]:\s*)+", "", name)
+    if len(name) > MAX_FILENAME_LENGTH:
+        # 유효한 MP4 파일명의 확장자를 보존한다.
+        name = name[:MAX_FILENAME_LENGTH - 4] + name[-4:]
+    return name
 
 
 class ResponseModel(BaseModel):
@@ -30,6 +44,23 @@ class JobStatus(ResponseModel):
     started_at: datetime | None = None
     finished_at: datetime | None = None
     error: ApiError | None = None
+
+
+class StoredJob(JobStatus):
+    original_filename: str | None = Field(default=None, max_length=MAX_FILENAME_LENGTH)
+    file_size_bytes: int | None = Field(default=None, ge=0)
+
+    @field_validator("original_filename")
+    @classmethod
+    def validate_original_filename(cls, value: str | None) -> str | None:
+        if value is not None and (not value or value != normalize_upload_filename(value)):
+            raise ValueError("Invalid stored upload filename")
+        return value
+
+    def to_storage(self) -> dict:
+        # 파일 정보 없이 생성된 작업은 상태를 갱신해도 기존 키 구성을 유지한다.
+        absent = {name for name in ("original_filename", "file_size_bytes") if getattr(self, name) is None}
+        return self.model_dump(mode="json", exclude=absent)
 
 
 class VideoInfo(ResponseModel):
@@ -85,3 +116,44 @@ class SceneReview(ReviewUpdate):
 class JobReviews(ResponseModel):
     job_id: UUID
     reviews: list[SceneReview]
+
+
+class JobHistoryQuery(ResponseModel):
+    status: JobState | None = None
+    search: str | None = Field(default=None, max_length=MAX_FILENAME_LENGTH)
+    sort: Literal["newest", "oldest"] = "newest"
+    limit: int = Field(default=20, ge=1, le=100)
+    offset: int = Field(default=0, ge=0)
+
+
+class JobAnalysisSummary(ResponseModel):
+    video: VideoInfo
+    event_count: int = Field(ge=0)
+    analysis_seconds: float = Field(ge=0)
+
+
+class ReviewSummary(ResponseModel):
+    unreviewed: int = Field(ge=0)
+    suspected: int = Field(ge=0)
+    false_positive: int = Field(ge=0)
+    deferred: int = Field(ge=0)
+    reviewed_count: int = Field(ge=0)
+
+
+class JobHistoryItem(StoredJob):
+    analysis: JobAnalysisSummary | None = None
+    reviews: ReviewSummary | None = None
+
+
+class JobHistoryWarning(ResponseModel):
+    job_id: UUID
+    error: ApiError
+
+
+class JobHistory(ResponseModel):
+    items: list[JobHistoryItem]
+    total: int = Field(ge=0)
+    count: int = Field(ge=0)
+    limit: int = Field(ge=1, le=100)
+    offset: int = Field(ge=0)
+    warnings: list[JobHistoryWarning]

@@ -20,7 +20,7 @@ from starlette.datastructures import UploadFile
 from scripts.make_test_video import make_test_video
 from src.road_anomaly.api.jobs import ApiSettings, JobManager, write_json_atomic
 from src.road_anomaly.api.main import create_app
-from src.road_anomaly.api.schemas import JobStatus
+from src.road_anomaly.api.schemas import JobStatus, normalize_upload_filename
 from src.road_anomaly.video_analysis import DETECTION_COLUMNS, MVP_SHA256, PROFILES
 
 
@@ -105,6 +105,301 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(response.json()["error"]["code"], code)
         self.assertNotIn(str(self.root), response.text)
         self.assertEqual(set(response.json()), {"error"})
+
+    def test_history_empty(self):
+        with self.client() as client:
+            self.assertEqual(client.get("/api/jobs").json(), {
+                "items": [], "total": 0, "count": 0, "limit": 20, "offset": 0, "warnings": [],
+            })
+
+    def test_history_invalid_queries(self):
+        with self.client() as client:
+            for params in ({"limit": 0}, {"limit": 101}, {"offset": -1}, {"offset": "x"},
+                           {"sort": "latest"}, {"status": "pending"}, {"search": "x" * 256}, {"extra": "x"}):
+                with self.subTest(params=params):
+                    self.assert_error(client.get("/api/jobs", params=params), 422, "invalid_request")
+
+    def test_history_upload_metadata_and_existing_status_contract(self):
+        filename = "전방 영상 (아침)+1.MP4"
+        with self.client() as client:
+            upload = client.post("/api/jobs", files={"file": (
+                f"C:\\개인폴더\\내부/{filename}", self.mp4, "video/mp4",
+            )})
+            self.assertEqual(upload.status_code, 202, upload.text)
+            self.assertEqual(set(upload.json()), set(JobStatus.model_fields))
+            job_id = upload.json()["job_id"]
+            self.assertEqual(set(self.wait(client, job_id)), set(JobStatus.model_fields))
+            path = self.settings.jobs_root / job_id / "job.json"
+            disk = json.loads(path.read_bytes())
+            row = client.get("/api/jobs", params={"search": "전방 영상"}).json()["items"][0]
+            for data in (disk, row):
+                self.assertEqual(data["original_filename"], filename)
+                self.assertEqual(data["file_size_bytes"], len(self.mp4))
+            stored = self.settings.uploads_root / job_id / "input.mp4"
+            self.assertEqual(stored.stat().st_size, len(self.mp4))
+            self.assertEqual([file.name for file in stored.parent.iterdir()], ["input.mp4"])
+            self.assertNotIn("개인폴더", path.read_text(encoding="utf-8"))
+
+    def test_history_filename_controls_drive_and_long_name(self):
+        self.assertEqual(normalize_upload_filename("C:\\folder/ C:\x00전방\r\n\t\u202e 한글.mp4"), "전방 한글.mp4")
+        name = "가" * 280 + ".MP4"
+        expected = "가" * 251 + ".MP4"
+        with self.client() as client:
+            job_id = self.upload(client, filename=name)
+            self.wait(client, job_id)
+            row = client.get("/api/jobs").json()["items"][0]
+            self.assertEqual(row["original_filename"], expected)
+            self.assertEqual(row["file_size_bytes"], len(self.mp4))
+
+    def test_job_metadata_save_failure_cleans_upload_and_job_before_queue(self):
+        with self.client(raise_server_exceptions=False) as client:
+            with self.assertLogs("src.road_anomaly.api.main", level="ERROR"):
+                with patch("src.road_anomaly.api.jobs.write_json_atomic", side_effect=OSError("disk write failed")):
+                    response = client.post("/api/jobs", files={"file": ("front.mp4", self.mp4, "video/mp4")})
+            self.assert_error(response, 500, "internal_error")
+            self.assertEqual(list(self.settings.uploads_root.iterdir()), [])
+            self.assertEqual(list(self.settings.jobs_root.iterdir()), [self.settings.jobs_root / ".worker.lock"])
+            self.assertEqual(self.calls, [])
+
+    def test_history_legacy_metadata_restart_and_read_only_access(self):
+        with self.client() as client:
+            first, second = self.upload(client), self.upload(client)
+            for job_id in (first, second):
+                self.wait(client, job_id)
+                path = self.settings.jobs_root / job_id / "job.json"
+                job = json.loads(path.read_bytes())
+                del job["original_filename"], job["file_size_bytes"]
+                write_json_atomic(path, job)
+            saved = client.put(f"/api/jobs/{first}/reviews/event_0001", json={"review": "deferred"})
+            self.assertEqual(saved.status_code, 200)
+            (self.settings.uploads_root / second / "input.mp4").unlink()
+            paths = list(self.settings.jobs_root.glob("*/*.json"))
+            original = {path: path.read_bytes() for path in paths}
+            previous = client.get("/api/jobs").json()
+            rows = {item["job_id"]: item for item in previous["items"]}
+            self.assertEqual(previous["warnings"], [])
+            self.assertIsNone(rows[first]["original_filename"])
+            self.assertEqual(rows[first]["file_size_bytes"], len(self.mp4))
+            self.assertIsNone(rows[second]["original_filename"])
+            self.assertIsNone(rows[second]["file_size_bytes"])
+            self.assertEqual(rows[first]["reviews"]["deferred"], 1)
+            self.assertEqual(rows[second]["reviews"]["unreviewed"], 1)
+            self.assertEqual(client.get("/api/jobs", params={"search": "sample"}).json()["items"], [])
+        with self.client() as client:
+            self.assertEqual(client.get("/api/jobs").json(), previous)
+            self.assertEqual({path: path.read_bytes() for path in self.settings.jobs_root.glob("*/*.json")}, original)
+            self.assertEqual(len(self.calls), 2)
+
+    def test_history_states_and_zero_completed_events(self):
+        attempted = Event()
+        entered = Event()
+        release = Event()
+        self.empty = True
+
+        def analyzer(video, **options):
+            if not attempted.is_set():
+                attempted.set()
+                raise RuntimeError(f"Internal filename: {video}")
+            entered.set()
+            if not release.wait(8):
+                raise TimeoutError
+            return self.analyze(video, **options)
+
+        with self.client(analyzer=analyzer) as client:
+            try:
+                with self.assertLogs("src.road_anomaly.api.jobs", level="ERROR"):
+                    failed = self.upload(client)
+                    self.wait(client, failed, "failed")
+                running = self.upload(client)
+                self.assertTrue(entered.wait(5))
+                queued = self.upload(client)
+                response = client.get("/api/jobs")
+                self.assertNotIn(str(self.root), response.text)
+                rows = {item["job_id"]: item for item in response.json()["items"]}
+                for job_id, status in ((failed, "failed"), (running, "running"), (queued, "queued")):
+                    self.assertEqual(rows[job_id]["status"], status)
+                    self.assertIsNone(rows[job_id]["analysis"])
+                    self.assertIsNone(rows[job_id]["reviews"])
+                self.assertEqual(rows[failed]["error"]["code"], "analysis_failed")
+            finally:
+                release.set()
+            self.wait(client, running)
+            self.wait(client, queued)
+            completed = client.get("/api/jobs", params={"status": "completed"}).json()
+            self.assertEqual(completed["total"], 2)
+            for row in completed["items"]:
+                self.assertEqual(row["analysis"]["event_count"], 0)
+                self.assertEqual(row["analysis"]["video"]["duration_sec"], 3)
+                self.assertEqual(row["analysis"]["analysis_seconds"], 0.2)
+                self.assertTrue(all(value == 0 for value in row["reviews"].values()))
+                self.assertNotIn("events", row["analysis"])
+                self.assertNotIn("settings", row["analysis"])
+
+    def test_history_filters_sort_ties_and_pagination(self):
+        with self.client() as client:
+            for i, status, filename, created in (
+                (1, "failed", "Dashcam-Rear.mp4", "2026-11-01T00:00:00Z"),
+                (2, "queued", "OTHER.mp4", "2026-11-02T00:00:00Z"),
+                (3, "failed", "DASHCAM-Front.mp4", "2026-11-03T01:00:00+01:00"),
+                (4, "failed", "dashcam 전방.mp4", "2026-11-03T00:00:00"),
+            ):
+                directory = self.settings.jobs_root / str(UUID(int=i))
+                directory.mkdir()
+                write_json_atomic(directory / "job.json", {"job_id": directory.name, "status": status,
+                                  "original_filename": filename, "created_at": created})
+            directory = self.settings.jobs_root / "ignore_this_directory"
+            directory.mkdir()
+            request = {"status": "failed", "search": "  DaShCam  ", "limit": 1}
+            first = client.get("/api/jobs", params=request).json()
+            next_page = client.get("/api/jobs", params={**request, "offset": 1}).json()
+            oldest = client.get("/api/jobs", params={**request, "sort": "oldest", "limit": 3}).json()
+            out = client.get("/api/jobs", params={**request, "offset": 3}).json()
+            self.assertEqual((first["total"], first["count"], first["items"][0]["job_id"]), (3, 1, str(UUID(int=4))))
+            self.assertEqual(next_page["items"][0]["job_id"], str(UUID(int=3)))
+            self.assertEqual([row["job_id"] for row in oldest["items"]], [str(UUID(int=i)) for i in (1, 3, 4)])
+            self.assertEqual((out["total"], out["count"], out["items"], out["warnings"]), (3, 0, [], []))
+
+    def test_history_review_summary_matches_explicit_updates(self):
+        self.multiple_events = True
+        with self.client() as client:
+            job_id = self.upload(client)
+            self.wait(client, job_id)
+            endpoint = f"/api/jobs/{job_id}/reviews"
+            for updates, expected in (
+                ((), (2, 0, 0, 0, 0)),
+                (((1, "suspected"), (2, "deferred")), (0, 1, 0, 1, 2)),
+                (((1, "false_positive"), (2, "unreviewed")), (1, 0, 1, 0, 1)),
+            ):
+                for index, review in updates:
+                    self.assertEqual(client.put(f"{endpoint}/event_{index:04}", json={"review": review}).status_code, 200)
+                row = client.get("/api/jobs").json()["items"][0]
+                self.assertEqual(row["analysis"]["event_count"], 2)
+                keys = ("unreviewed", "suspected", "false_positive", "deferred", "reviewed_count")
+                self.assertEqual(row["reviews"], dict(zip(keys, expected, strict=True)))
+            self.assertEqual([row["review"] for row in client.get(endpoint).json()["reviews"]],
+                             ["false_positive", "unreviewed"])
+
+    def test_history_damage_is_reported_and_off_page_results_are_not_read(self):
+        with self.client() as client:
+            bad_results, bad_reviews, valid = [self.upload(client) for _ in range(3)]
+            for job_id in (bad_results, bad_reviews, valid):
+                self.wait(client, job_id)
+            incomplete = str(uuid4())
+            (self.settings.jobs_root / incomplete).mkdir()
+            corrupt_job = str(uuid4())
+            corrupt_directory = self.settings.jobs_root / corrupt_job
+            corrupt_directory.mkdir()
+            (corrupt_directory / "job.json").write_bytes(b"{")
+            invalid_result_path = self.settings.jobs_root / bad_results / "results.json"
+            original_result = json.loads(invalid_result_path.read_bytes())
+            write_json_atomic(invalid_result_path, {**original_result, "event_count": 100})
+            review_path = self.settings.jobs_root / bad_reviews / "reviews.json"
+            entry = {"event_id": "event_9999", "review": "suspected", "updated_at": "2026-11-26T00:00:00Z"}
+            write_json_atomic(review_path, {"job_id": bad_reviews, "reviews": [entry]})
+            with self.assertLogs("src.road_anomaly.api.jobs", level="WARNING") as logs:
+                page = client.get("/api/jobs", params={"limit": 1}).json()
+                body = client.get("/api/jobs").json()
+            self.assertEqual(page["items"][0]["job_id"], valid)
+            self.assertEqual(page["total"], 3)
+            self.assertEqual({warning["job_id"] for warning in page["warnings"]}, {incomplete, corrupt_job})
+            self.assertEqual({warning["job_id"]: warning["error"]["code"] for warning in body["warnings"]}, {
+                incomplete: "job_data_unavailable", corrupt_job: "job_data_unavailable",
+                bad_results: "results_unavailable", bad_reviews: "review_data_invalid",
+            })
+            by_id = {row["job_id"]: row for row in body["items"]}
+            self.assertIsNone(by_id[bad_results]["analysis"])
+            self.assertIsNone(by_id[bad_results]["reviews"])
+            self.assertEqual(by_id[bad_reviews]["analysis"]["event_count"], 1)
+            self.assertIsNone(by_id[bad_reviews]["reviews"])
+            self.assertEqual(by_id[valid]["reviews"]["unreviewed"], 1)
+            self.assertTrue(any(bad_reviews in row for row in logs.output))
+
+    def test_history_review_read_failure_is_distinct_from_missing_file(self):
+        with self.client() as client:
+            job_id = self.upload(client)
+            self.wait(client, job_id)
+            review_path = self.settings.jobs_root / job_id / "reviews.json"
+            read = Path.read_bytes
+
+            def denied(path):
+                if path == review_path:
+                    raise PermissionError("private location")
+                return read(path)
+
+            with self.assertLogs("src.road_anomaly.api.jobs", level="WARNING"):
+                with patch.object(Path, "read_bytes", denied):
+                    response = client.get("/api/jobs")
+            self.assertNotIn("private location", response.text)
+            body = response.json()
+            self.assertIsNone(body["items"][0]["reviews"])
+            self.assertEqual(body["warnings"][0]["error"]["code"], "review_read_failed")
+
+    def test_history_redirected_paths_do_not_read_other_jobs(self):
+        with self.client() as client:
+            first, another = self.upload(client), self.upload(client)
+            self.wait(client, first)
+            self.wait(client, another)
+            directory = self.settings.jobs_root / first
+            path = directory / "job.json"
+            disk = json.loads(path.read_bytes())
+            del disk["file_size_bytes"]
+            write_json_atomic(path, disk)
+            upload = self.settings.uploads_root / first / "input.mp4"
+            other_directory = self.settings.jobs_root / another
+            other_upload = self.settings.uploads_root / another / "input.mp4"
+            resolve = Path.resolve
+            for source, target, code in (
+                (path, other_directory / "job.json", "job_data_unavailable"),
+                (directory / "results.json", other_directory / "results.json", "results_unavailable"),
+                (directory / "reviews.json", other_directory / "reviews.json", "review_data_invalid"),
+                (upload, other_upload, "upload_size_unavailable"),
+            ):
+                with self.subTest(code=code):
+                    def redirected(path_arg, *args, **kwargs):
+                        return target if path_arg == source else resolve(path_arg, *args, **kwargs)
+
+                    with self.assertLogs("src.road_anomaly.api.jobs", level="WARNING"):
+                        with patch.object(Path, "resolve", redirected):
+                            response = client.get("/api/jobs")
+                    self.assertEqual(response.status_code, 200)
+                    self.assertNotIn(str(self.root), response.text)
+                    body = response.json()
+                    self.assertEqual(body["warnings"][0]["job_id"], first)
+                    self.assertEqual(body["warnings"][0]["error"]["code"], code)
+                    row = next((item for item in body["items"] if item["job_id"] == first), None)
+                    if code == "job_data_unavailable":
+                        self.assertIsNone(row)
+                    else:
+                        self.assertIsNone(row[{"results_unavailable": "analysis", "review_data_invalid": "reviews",
+                                               "upload_size_unavailable": "file_size_bytes"}[code]])
+
+    def test_history_reads_during_review_updates_return_consistent_counts(self):
+        self.multiple_events = True
+        with self.client() as client:
+            job_id = self.upload(client)
+            self.wait(client, job_id)
+            started = Barrier(3, timeout=5)
+
+            def save(index, review):
+                started.wait()
+                return client.put(f"/api/jobs/{job_id}/reviews/event_{index:04}", json={"review": review})
+
+            def read():
+                started.wait()
+                return [client.get("/api/jobs").json() for _ in range(8)]
+
+            with ThreadPoolExecutor(max_workers=3) as workers:
+                reader = workers.submit(read)
+                saves = [workers.submit(save, i, review) for i, review in ((1, "suspected"), (2, "deferred"))]
+                self.assertTrue(all(result.result().status_code == 200 for result in saves))
+                for body in reader.result():
+                    self.assertEqual(body["warnings"], [])
+                    reviews = body["items"][0]["reviews"]
+                    self.assertEqual(reviews["reviewed_count"], reviews["suspected"] + reviews["deferred"])
+                    self.assertEqual(reviews["unreviewed"] + reviews["reviewed_count"], 2)
+            final = client.get("/api/jobs").json()["items"][0]["reviews"]
+            self.assertEqual(final, {"unreviewed": 0, "suspected": 1, "false_positive": 0, "deferred": 1,
+                                     "reviewed_count": 2})
 
     def test_health_contract_and_local_cors(self):
         with self.client() as client:

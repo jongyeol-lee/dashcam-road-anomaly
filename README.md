@@ -141,6 +141,7 @@ Get-FileHash -Algorithm SHA256 'outputs/yolo_multicountry/czech_japan_pilot_v1_y
 ```powershell
 $api = 'http://127.0.0.1:8000'
 Invoke-RestMethod "$api/api/health"
+Invoke-RestMethod "$api/api/jobs?status=completed&limit=5&offset=0"
 $job = curl.exe --silent --show-error --fail -F 'file=@data/raw/dashcam_validation/Dashcam-Front.mp4' "$api/api/jobs" | ConvertFrom-Json
 $jobId = $job.job_id
 Invoke-RestMethod "$api/api/jobs/$jobId"
@@ -163,7 +164,7 @@ curl.exe --silent --range 0-1023 --dump-header - --output NUL "$api/api/jobs/$jo
 | 작업별 저장 경로 | 내용 |
 | --- | --- |
 | `data/raw/uploads/<job_id>/input.mp4` | 업로드한 영상 사본 |
-| `outputs/jobs/<job_id>/job.json`, `results.json` | 원자적으로 저장하는 상태와 프론트엔드용 결과 |
+| `outputs/jobs/<job_id>/job.json`, `results.json` | 원자적으로 저장하는 상태·신규 업로드의 파일명과 크기, 프론트엔드용 결과 |
 | `outputs/jobs/<job_id>/reviews.json` | 완료 작업에서 장면별로 저장한 사용자 검토와 마지막 수정 시각 |
 | `data/processed/frames/jobs/<job_id>/` | 샘플링 프레임과 CSV |
 | `outputs/video_analysis/jobs/<job_id>/` | 기존 형식의 summary·detections·events·scenes |
@@ -173,5 +174,7 @@ curl.exe --silent --range 0-1023 --dump-header - --output NUL "$api/api/jobs/$jo
 업로드 기본 제한은 200MiB입니다. `api/jobs.py`의 `ApiSettings`와 `create_app(settings)`로 크기·청크·구간 길이를 설정할 수 있고 환경 파일은 사용하지 않습니다. 전체 디코딩 검증은 202 반환 전에 수행하므로 업로드 응답에는 검증 시간이 포함됩니다. 표준 `ftyp` 헤더가 선두에 있는 MP4를 받고, OpenCV가 보고한 프레임 수와 전체 디코딩 수가 다르면 거절합니다. 재인코딩은 제공하지 않아 OpenCV 지원과 브라우저 코덱 지원은 별개입니다.
 
 단일 큐의 동기 분석을 별도 스레드 1개가 수행하며 같은 저장소의 중복 API 프로세스는 잠금으로 차단합니다. 상태는 `queued → running → completed/failed`이고 가짜 진행률을 제공하지 않습니다. 재시작 시 완료 결과는 유지하고 남아 있던 queued/running은 failed(`interrupted`)로 바꿉니다. 정상 종료는 현재 추론을 기다리며 대기 작업은 중단 처리합니다. 자동 재실행·취소·파일 보존 기간·삭제 API는 이번 범위에 없습니다.
+
+`GET /api/jobs`는 저장된 작업을 최신순으로 조회하며 상태 필터, 파일명 부분 검색, 정렬, 페이지네이션을 지원합니다. 완료 작업의 의심 장면 수와 사용자 검토 요약을 함께 반환합니다. 이전 작업의 원본 파일명은 확인할 수 없으면 null입니다. [이력 API 계약](docs/api_contract.md#분석-이력) · [실제 전·후방 작업 검증](docs/experiments/part6_job_history_api.md)
 
 CORS는 `http://localhost:5173`, `http://127.0.0.1:5173`만 허용합니다. 인증이 없는 로컬 단일 사용자 MVP이며 외부 인터넷에 공개하지 않습니다. 임시 Ultralytics·Matplotlib 설정과 오프라인·자동 설치 금지를 유지합니다. [React 실행과 테스트](frontend/README.md)

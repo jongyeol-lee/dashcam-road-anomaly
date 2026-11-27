@@ -8,6 +8,7 @@
 | --- | --- | --- | --- |
 | GET | `/api/health` | 200 JSON | API 응답 가능 여부. CUDA·가중치 준비 보장은 아님 |
 | POST | `/api/jobs` | 202 JobStatus | MP4 검증·저장 후 작업 생성 |
+| GET | `/api/jobs` | 200 JobHistory | 저장된 분석 이력과 검토 요약 |
 | GET | `/api/jobs/{job_id}` | 200 JobStatus | 상태와 시각·실패 정보 |
 | GET | `/api/jobs/{job_id}/results` | 200 AnalysisResults | 완료 결과 |
 | GET | `/api/jobs/{job_id}/reviews` | 200 JobReviews | 완료 작업의 저장된 검토 결과 |
@@ -22,6 +23,8 @@
 `multipart/form-data`의 파일 필드 `file` 하나만 보냅니다. 추가 텍스트 필드나 복수 파일은 거절합니다. 확장자는 대소문자를 구분하지 않는 `.mp4`이고 MIME만으로 정상 여부를 판단하지 않습니다. 파일별 기본 제한은 정확히 `209715200`바이트(200MiB), 요청 전체는 이 값에 multipart 오버헤드 64KiB를 더한 크기로 제한합니다. Content-Length가 없는 전송도 수신 바이트 수로 제한합니다. 파일은 1MiB 청크로 복사하며 실패한 요청의 사본은 정리합니다.
 
 선두 `ftyp` MP4 헤더(QuickTime `qt` 제외), 유효한 FPS·크기, 전체 디코딩과 보고된 프레임 수를 검사합니다. 디코더가 오류를 복구한 파일의 모든 손상을 판별하는 검사는 아닙니다. 검증은 202 전에 수행하며 YOLO는 응답과 독립된 워커에서 실행합니다. 같은 영상을 다시 올리면 별도 작업이 생깁니다.
+
+신규 작업의 `job.json`에는 `original_filename`과 `file_size_bytes`도 저장합니다. 표시용 파일명에는 경로의 마지막 구성 요소만 사용합니다. Windows 드라이브 접두사와 유니코드 제어·서식 문자 및 서로게이트를 제거하고 앞뒤 공백을 정리합니다. 한글과 이름 내부의 공백은 보존합니다. 255자를 넘으면 확장자를 포함해 255자로 줄입니다. 크기는 저장된 `input.mp4`의 바이트 수입니다. 파일 정보는 아래 이력 응답에서 제공합니다.
 
 ```javascript
 const form = new FormData();
@@ -58,6 +61,41 @@ const job = await response.json();
 | `error` | 정상은 null, 실패는 `{code, message}` |
 
 프론트엔드는 약 0.5~1초 간격으로 상태를 조회하고 completed/failed에서 폴링을 멈출 수 있습니다. 진행률 필드는 없습니다. 재시작 때 남아 있던 queued/running은 failed와 `error.code: interrupted`로 바뀌며 자동 재실행하지 않습니다.
+
+## 분석 이력
+
+| 쿼리 | 기본값 | 허용 값과 동작 |
+| --- | --- | --- |
+| `status` | 전체 | `queued`, `running`, `completed`, `failed` |
+| `search` | 전체 | 표시용 파일명의 부분 검색. 최대 255자, 앞뒤 공백 무시, 유니코드 대소문자 구분 없음. 빈 검색어는 전체 |
+| `sort` | `newest` | `newest`는 생성 시각 내림차순, `oldest`는 오름차순. 시각이 같으면 UUID도 같은 방향으로 정렬 |
+| `limit` | 20 | 한 페이지에 1~100건 |
+| `offset` | 0 | 정렬된 결과에서 건너뛸 건수. 0 이상의 정수 |
+
+최근 5건은 `GET /api/jobs?limit=5&offset=0`, 완료 작업 검색은 `GET /api/jobs?status=completed&search=Dashcam&sort=oldest`로 조회합니다. 잘못된 값이나 지원하지 않는 파라미터에는 HTTP 422와 `invalid_request`를 반환합니다.
+
+`JobHistory`는 `items`, `total`, `count`, `limit`, `offset`, `warnings`로 구성됩니다. `total`은 검색과 상태 조건이 일치하는 작업 수, `count`는 현재 페이지의 `items.length`입니다. 빈 저장소와 범위 밖 페이지 모두 HTTP 200으로 처리합니다. 범위 밖 페이지에서도 `total`은 유지됩니다.
+
+| `items[]` 필드 | 타입·의미 |
+| --- | --- |
+| `job_id`, `status`, `created_at`, `started_at`, `finished_at`, `error` | 개별 상태 API와 동일 |
+| `original_filename` | 업로드 시 저장한 표시용 이름. 이름이 없는 기존 작업은 null이며 비어 있지 않은 검색어에는 매칭되지 않음 |
+| `file_size_bytes` | 업로드 당시 실제 크기. 기존 작업은 고정 경로의 일반 파일 크기를 조회. 확인할 수 없으면 null |
+| `analysis` | `{video, event_count, analysis_seconds}`. `video`는 개별 결과 API의 구조를 재사용 |
+| `reviews` | `{unreviewed, suspected, false_positive, deferred, reviewed_count}`. 전체 의심 장면 수는 `analysis.event_count` |
+
+완료 전과 실패 상태에서는 `analysis`와 `reviews`가 null입니다. 정상적으로 분석을 마친 무탐지 작업은 `analysis.event_count`와 모든 검토 건수가 0입니다. 검토 파일이 없는 완료 작업에서는 실제 장면 전부가 미검토입니다. `reviewed_count`는 파손 의심·오탐·판단 보류의 합계이며, 명시적으로 미검토로 돌아간 장면은 미검토에 포함됩니다.
+
+`warnings[]`는 `{job_id, error: {code, message}}` 형식입니다. 저장소 일부만 읽을 수 있으면 HTTP 200과 함께 아래 경고를 반환합니다. 비정규 UUID 경로는 목록에서 무시합니다.
+
+| 경고 코드 | 목록과 집계에 미치는 영향 |
+| --- | --- |
+| `job_data_unavailable` | 유효한 작업 정보를 읽을 수 없어 행과 `total`에서 제외. 조회 조건 판정 전이므로 다른 페이지나 검색에서도 반환될 수 있음 |
+| `results_unavailable` | 현재 페이지의 완료 행을 유지하고 `analysis`·`reviews`는 null |
+| `review_data_invalid`, `review_read_failed` | 현재 페이지 행과 유효한 `analysis`를 유지하고 `reviews`는 null |
+| `upload_size_unavailable` | 기존 업로드 경로가 허용되지 않거나 파일 종류·크기를 읽을 수 없어 `file_size_bytes`는 null. 정상적으로 누락된 기존 영상은 경고 없이 null |
+
+프론트엔드는 null 요약을 0건으로 표시하지 않고 조회 경고와 함께 다룹니다. 완료 행의 `job_id`로 기존 React 결과 주소 `/jobs/<job_id>/results`를 열 수 있습니다. 장면 배열, JPEG, 영상과 추론 설정은 상세 API에서 가져옵니다. 전체 저장소 상태를 한 시점에 고정하지 않으므로 업로드나 검토 중에는 페이지와 요약이 바뀔 수 있습니다. 검색·정렬·필터를 바꾸면 `offset=0`부터 다시 요청합니다. [구현과 검증](experiments/part6_job_history_api.md)
 
 ## 완료 결과
 
@@ -162,7 +200,7 @@ Content-Length: 1024
 | 409 | `results_not_ready` | queued/running/failed 작업의 결과·이미지·검토 조회 또는 검토 저장 |
 | 413 | `upload_too_large` | 파일 또는 전체 요청 크기 초과 |
 | 415 | `unsupported_file_type` | MP4 확장자 아님 |
-| 422 | `invalid_request` / `empty_file` / `invalid_video` | 잘못된 UUID·event_id·검토 요청, 필수 파일 누락, 빈 파일, 디코딩 실패 |
+| 422 | `invalid_request` / `empty_file` / `invalid_video` | 잘못된 UUID·event_id·검토 요청·목록 조건, 필수 파일 누락, 빈 파일, 디코딩 실패 |
 | 416 | `invalid_range` | 영상 파일 범위 밖 Range |
 | 500 | `internal_error` | 저장·조회 중 서버 오류. 상세는 로컬 로그 |
 | 500 | `review_data_invalid` | 검토 JSON이 깨졌거나 작업·장면·스키마가 일치하지 않음 |

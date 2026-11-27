@@ -7,7 +7,7 @@ from tempfile import TemporaryDirectory
 from typing import Annotated
 from uuid import UUID, uuid4
 
-from fastapi import FastAPI, File, Path as PathParameter, UploadFile
+from fastapi import FastAPI, File, Path as PathParameter, Query, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
@@ -15,7 +15,10 @@ from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException
 
 from .jobs import ApiSettings, JobError, JobManager, contained_path, validate_upload
-from .schemas import AnalysisResults, ErrorResponse, EVENT_ID_PATTERN, JobReviews, JobStatus, ReviewUpdate, SceneReview
+from .schemas import (
+    AnalysisResults, ErrorResponse, EVENT_ID_PATTERN, JobHistory, JobHistoryQuery, JobReviews, JobStatus,
+    ReviewUpdate, SceneReview, normalize_upload_filename,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -117,7 +120,8 @@ def create_app(settings: ApiSettings | None = None, *, analyzer=None) -> FastAPI
         directory = None
         committed = False
         try:
-            if not file.filename or Path(file.filename).suffix.lower() != ".mp4":
+            filename = normalize_upload_filename(file.filename or "")
+            if Path(filename).suffix.lower() != ".mp4":
                 raise JobError(415, "unsupported_file_type", "MP4 파일만 업로드할 수 있습니다.")
             if file.size is not None and file.size > settings.max_upload_bytes:
                 raise JobError(413, "upload_too_large", "업로드 파일 크기 제한을 초과했습니다.")
@@ -137,8 +141,8 @@ def create_app(settings: ApiSettings | None = None, *, analyzer=None) -> FastAPI
             if size == 0:
                 raise JobError(422, "empty_file", "빈 파일은 업로드할 수 없습니다.")
             validate_upload(partial)
-            partial.rename(directory / "input.mp4")
-            job = manager.submit(job_id)
+            stored_size = partial.rename(directory / "input.mp4").stat().st_size
+            job = manager.submit(job_id, original_filename=filename, file_size_bytes=stored_size)
             committed = True
             return job
         finally:
@@ -148,6 +152,11 @@ def create_app(settings: ApiSettings | None = None, *, analyzer=None) -> FastAPI
                 for name in ("input.part", "input.mp4"):
                     (directory / name).unlink(missing_ok=True)
                 directory.rmdir()
+
+    @app.get("/api/jobs", response_model=JobHistory)
+    def job_history(query: Annotated[JobHistoryQuery, Query()]):
+        """저장된 분석 작업과 페이지에 포함된 작업의 검토 요약을 조회한다."""
+        return manager.list_history(query)
 
     @app.get("/api/jobs/{job_id}", response_model=JobStatus)
     def job_status(job_id: UUID):

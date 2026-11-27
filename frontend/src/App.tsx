@@ -3,6 +3,7 @@ import { useEffect } from 'react'
 import { Layout, EmptyState } from './components/ui'
 import { SessionProvider } from './mocks/SessionProvider'
 import { UploadPage } from './pages/UploadPage'
+import { HistoryPage } from './pages/HistoryPage'
 import { AnalysisPage, ExampleAnalysisPage } from './pages/AnalysisPage'
 import { ExampleResultsPage, ResultsPage } from './pages/ResultsPage'
 
@@ -17,6 +18,7 @@ function RouteFocus() {
 export default function App() {
   return <BrowserRouter><Layout><RouteFocus /><Routes>
     <Route path="/" element={<UploadPage />} />
+    <Route path="/history" element={<HistoryPage />} />
     <Route path="/jobs/:jobId" element={<AnalysisPage />} />
     <Route path="/jobs/:jobId/results" element={<ResultsPage />} />
     <Route path="/examples" element={<SessionProvider><Outlet /></SessionProvider>}>

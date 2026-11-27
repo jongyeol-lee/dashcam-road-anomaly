@@ -1,5 +1,8 @@
 import { API_BASE, CLASS_LABELS, REVIEW_LABELS } from '../config/service'
-import type { AnalysisResults, ErrorResponse, JobReviews, JobStatus, ReviewState, Scene, SceneReview } from './types'
+import type {
+  AnalysisResults, ErrorResponse, JobAnalysisSummary, JobHistory, JobHistoryItem, JobHistoryQuery,
+  JobReviews, JobStatus, ReviewState, ReviewSummary, Scene, SceneReview,
+} from './types'
 
 const errorMessages: Record<string, string> = {
   invalid_request: '요청 정보를 확인해 주세요.',
@@ -50,14 +53,60 @@ function isNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value)
 }
 
+function isJobId(value: unknown): value is string {
+  return typeof value === 'string' && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(value)
+}
+
 function isJobStatus(value: unknown): value is JobStatus {
-  return isRecord(value) && typeof value.job_id === 'string'
-    && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(value.job_id)
+  return isRecord(value) && isJobId(value.job_id)
     && (value.status === 'queued' || value.status === 'running' || value.status === 'completed' || value.status === 'failed')
     && typeof value.created_at === 'string'
     && (value.started_at === null || typeof value.started_at === 'string')
     && (value.finished_at === null || typeof value.finished_at === 'string')
     && (value.error === null || isErrorResponse(value))
+}
+
+function isCount(value: unknown): value is number {
+  return isNumber(value) && Number.isSafeInteger(value) && value >= 0
+}
+
+function isAnalysisSummary(value: unknown): value is JobAnalysisSummary {
+  return isRecord(value) && isCount(value.event_count) && isNumber(value.analysis_seconds) && value.analysis_seconds >= 0
+    && isRecord(value.video) && isNumber(value.video.fps) && value.video.fps > 0
+    && isCount(value.video.width) && value.video.width > 0 && isCount(value.video.height) && value.video.height > 0
+    && isCount(value.video.frame_count)
+    && (value.video.duration_sec === null || (isNumber(value.video.duration_sec) && value.video.duration_sec >= 0))
+}
+
+function isReviewSummary(value: unknown): value is ReviewSummary {
+  return isRecord(value)
+    && [value.unreviewed, value.suspected, value.false_positive, value.deferred, value.reviewed_count].every(isCount)
+}
+
+function isHistoryTimestamp(value: string): boolean {
+  return /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)?$/.test(value)
+    && Number.isFinite(Date.parse(value))
+}
+
+function isHistoryItem(value: unknown): value is JobHistoryItem {
+  return isRecord(value) && isJobStatus(value)
+    && isHistoryTimestamp(value.created_at)
+    && (value.started_at === null || isHistoryTimestamp(value.started_at))
+    && (value.finished_at === null || isHistoryTimestamp(value.finished_at))
+    && (value.original_filename === null || (typeof value.original_filename === 'string' && value.original_filename.length > 0))
+    && (value.file_size_bytes === null || isCount(value.file_size_bytes))
+    && (value.analysis === null || isAnalysisSummary(value.analysis))
+    && (value.reviews === null || isReviewSummary(value.reviews))
+}
+
+function isJobHistory(value: unknown, { limit, offset }: JobHistoryQuery): value is JobHistory {
+  return isRecord(value) && value.limit === limit && value.offset === offset
+    && isCount(value.total) && isCount(value.count)
+    && value.count === Math.min(limit, Math.max(0, value.total - offset))
+    && Array.isArray(value.items) && value.items.length === value.count && value.items.every(isHistoryItem)
+    && new Set(value.items.map(item => item.job_id)).size === value.count
+    && Array.isArray(value.warnings)
+    && value.warnings.every(warning => isRecord(warning) && isJobId(warning.job_id) && isErrorResponse(warning))
 }
 
 export function apiUrl(path: string): string {
@@ -149,6 +198,14 @@ export function uploadVideo(file: File, signal: AbortSignal) {
   const body = new FormData()
   body.append('file', file)
   return request('/api/jobs', { method: 'POST', body, signal }, 202, isJobStatus)
+}
+
+export function getJobHistory(query: JobHistoryQuery, signal: AbortSignal) {
+  const params = new URLSearchParams({ limit: String(query.limit), offset: String(query.offset), sort: query.sort })
+  if (query.status) params.set('status', query.status)
+  if (query.search) params.set('search', query.search)
+  return request(`/api/jobs?${params}`, { signal, cache: 'no-store' }, 200,
+    (value): value is JobHistory => isJobHistory(value, query))
 }
 
 export function getJob(jobId: string, signal: AbortSignal) {

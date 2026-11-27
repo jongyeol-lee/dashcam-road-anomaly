@@ -3,7 +3,7 @@ import { Check, CircleAlert, FileVideo, LoaderCircle, Pause, Play, ScanLine } fr
 import { ApiRequestError, apiErrorMessage, errorMessage, getJob } from '../api/client'
 import type { JobStatus } from '../api/types'
 import { useJobQuery } from '../api/useJobQuery'
-import { Button, JobInfo, JobNotice, StatusBadge } from '../components/ui'
+import { Button, HistoryBackLink, JobInfo, JobNotice, StatusBadge } from '../components/ui'
 import { PHASE_LABELS, PHASE_MESSAGES, type AnalysisPhase } from '../config/service'
 import { useSession } from '../mocks/SessionContext'
 
@@ -51,6 +51,7 @@ function AnalysisView({ jobId, phase, filename, queryError, onRetry, failure, ex
   failure?: string
   example?: { auto: boolean; onPhase: (phase: AnalysisPhase) => void; onToggle: () => void }
 }) {
+  const { state } = useLocation()
   const stages: AnalysisPhase[] = example ? ['uploading', 'queued', 'running', 'completed'] : ['queued', 'running', 'completed']
   const currentIndex = phase ? stages.indexOf(phase) : -1
   const failed = phase === 'failed'
@@ -71,7 +72,8 @@ function AnalysisView({ jobId, phase, filename, queryError, onRetry, failure, ex
       {failed && <p role="alert" className="error-message">{failure ?? '영상 분석에 실패했습니다. 영상을 다시 선택해 주세요.'}</p>}
       <div className="button-row justify-center">
         {queryError && <Button onClick={onRetry}>상태 다시 확인</Button>}
-        {phase === 'completed' && <Link className="button button-primary" to={resultsPath} state={filename ? { filename } : undefined}><ScanLine size={18} aria-hidden="true" />결과 확인</Link>}
+        {phase === 'completed' && <Link className="button button-primary" to={resultsPath} state={state}><ScanLine size={18} aria-hidden="true" />결과 확인</Link>}
+        <HistoryBackLink />
         <Link to="/" className="button button-secondary">{failed ? '다른 영상 선택' : '영상 선택 화면으로'}</Link>
       </div>
     </section>

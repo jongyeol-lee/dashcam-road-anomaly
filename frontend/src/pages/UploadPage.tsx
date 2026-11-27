@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router'
 import { Upload, ScanLine, ListChecks, ShieldCheck, Film, Check, FileVideo, LoaderCircle, X } from 'lucide-react'
 import { checkHealth, errorMessage, uploadVideo } from '../api/client'
 import { Button } from '../components/ui'
+import { RecentHistory } from '../features/history/RecentHistory'
 import { validateFiles, formatFileSize } from '../features/upload/validation'
 import { DEMO_IDS, type DemoScenario } from '../mocks/fixtures'
 
@@ -75,6 +76,7 @@ export function UploadPage() {
       {uploading && <div className="inline-notice" role="status">서버에 영상을 전송하고 재생 가능한 파일인지 확인하고 있습니다.</div>}
       {uploadError && <p className="error-message" role="alert">{uploadError}</p>}
     </section>
+    <RecentHistory />
     <section className="how-it-works" aria-label="서비스 이용 과정">
       {[{ Icon: Upload, title: '영상 업로드', text: '운행을 마친 뒤 녹화된 MP4를 선택하세요.' }, { Icon: ScanLine, title: 'AI 분석', text: '균열과 포트홀의 의심 구간을 모아봅니다.' }, { Icon: ListChecks, title: '의심 장면 확인', text: '대표 장면과 영상 시각으로 직접 검토하세요.' }].map(({ Icon, title, text }) => <div className="process-step" key={title}><Icon size={23} aria-hidden="true" /><div><h3>{title}</h3><p>{text}</p></div></div>)}
     </section>

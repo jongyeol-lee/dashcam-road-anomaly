@@ -28,6 +28,39 @@ export interface VideoInfo {
   frame_count: number
   duration_sec: number | null
 }
+export interface JobHistoryQuery {
+  status?: JobState
+  search?: string
+  sort: 'newest' | 'oldest'
+  limit: number
+  offset: number
+}
+export interface JobAnalysisSummary {
+  video: VideoInfo
+  event_count: number
+  analysis_seconds: number
+}
+export interface ReviewSummary extends Record<ReviewState, number> {
+  reviewed_count: number
+}
+export interface JobHistoryItem extends JobStatus {
+  original_filename: string | null
+  file_size_bytes: number | null
+  analysis: JobAnalysisSummary | null
+  reviews: ReviewSummary | null
+}
+export interface JobHistoryWarning {
+  job_id: string
+  error: ApiError
+}
+export interface JobHistory {
+  items: JobHistoryItem[]
+  total: number
+  count: number
+  limit: number
+  offset: number
+  warnings: JobHistoryWarning[]
+}
 export interface Scene {
   event_id: string
   class_id: number

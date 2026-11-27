@@ -24,6 +24,8 @@ Playwright는 설치된 Microsoft Edge에서 프론트엔드 빌드를 사용한
 
 실제 작업의 결과 화면에서 검토 상태를 선택하면 FastAPI에 저장된다. `저장 완료`를 확인한 뒤에는 새로고침하거나 서버를 다시 시작해도 같은 작업에서 복원된다. 저장이 실패하면 현재 저장값과 시도한 값이 표시되며 저장을 다시 시도할 수 있다. 전체 검토 집계에는 판단 보류가 포함된다. 검토 상태·탐지 종류·정렬을 바꾸면 목록과 타임라인이 함께 갱신된다. 예시 화면의 검토는 예시 세션에서 유지되며 새로고침하면 초기화된다. [검토 저장 검증](../docs/experiments/part6_review_persistence.md)
 
+메인의 **최근 분석 이력**에서 최근 5건까지, 헤더의 **분석 이력** 또는 **전체 보기**에서 전체 작업을 확인할 수 있다. 파일명은 입력 후 Enter 또는 **검색**으로 조회한다. 상태와 정렬은 선택 즉시 적용한다. 검색·필터·정렬·현재 페이지는 `/history` URL에 저장한다. 상세 화면의 **분석 이력으로** 링크나 브라우저 뒤로 가기로 돌아오면 같은 조건으로 새로 조회한다. 목록의 **새로고침**은 현재 조건을 유지한다. [이력 화면 구현과 검증](../docs/experiments/part6_job_history_ui.md)
+
 ## Vite 템플릿 참고
 
 This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.

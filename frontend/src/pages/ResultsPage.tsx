@@ -4,7 +4,7 @@ import { CheckCheck, FileVideo, ListFilter, Plus, ScanLine, CircleCheck, Info } 
 import type { AnalysisResults, ClassCode, ReviewState } from '../api/types'
 import { ApiRequestError, apiUrl, errorMessage, getResults } from '../api/client'
 import { useJobQuery } from '../api/useJobQuery'
-import { Button, EmptyState, JobInfo, JobNotice, StatusBadge } from '../components/ui'
+import { Button, EmptyState, HistoryBackLink, JobInfo, JobNotice, StatusBadge } from '../components/ui'
 import { CLASS_LABELS, REVIEW_LABELS } from '../config/service'
 import { useSession } from '../mocks/SessionContext'
 import { ReviewFeedback, SceneDetail } from '../features/results/SceneDetail'
@@ -156,7 +156,10 @@ function ResultsWorkspace({
         </p>
         <JobInfo jobId={result.job_id} />
       </div>
-      <Link to="/" className="button button-primary"><Plus size={18} aria-hidden="true" />새 영상 분석</Link>
+      <div className="button-row result-heading-actions">
+        <HistoryBackLink />
+        <Link to="/" className="button button-primary"><Plus size={18} aria-hidden="true" />새 영상 분석</Link>
+      </div>
     </div>
     <section className="summary-strip" aria-label="분석 요약">{[
       ['분석 프레임', `${result.inferred_frame_count.toLocaleString()}장`, `추출 ${result.extracted_frame_count}장 중 추론한 프레임`],

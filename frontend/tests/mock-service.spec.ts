@@ -1,7 +1,10 @@
 import { expect, test, type Page, type Route } from '@playwright/test'
-import type { AnalysisResults, JobState, ReviewState, Scene, SceneReview } from '../src/api/types'
+import type {
+  AnalysisResults, JobHistory, JobHistoryItem, JobHistoryWarning, JobState, ReviewState, Scene, SceneReview,
+} from '../src/api/types'
 
 const api = 'http://127.0.0.1:8000/api'
+const jobsUrl = (url: URL) => url.origin + url.pathname === api + '/jobs'
 const job = '10000000-2000-4000-8000-000000000001'
 const otherJob = '10000000-2000-4000-8000-000000000002'
 const jobPath = '/jobs/' + job
@@ -139,13 +142,18 @@ test.beforeEach(async ({ page }) => {
   // 처리되지 않은 API 요청도 실제 FastAPI 포트로 보내지 않는다.
   await page.route(api + '/**', route => route.abort())
   await page.route(api + '/health', route => json(route, { status: 'ok' }))
+  await mockHistory(page)
   await page.route(api + '/jobs/*/scenes/*', route => route.fulfill({ contentType: 'image/png', body: scenePng }))
   await mockReviews(page)
 })
 
 test('파일 선택, 변경, 취소 및 브라우저 입력 검증', async ({ page }) => {
   let posts = 0
-  await page.route(api + '/jobs', route => { posts++; return route.abort() })
+  await page.route(jobsUrl, route => {
+    if (route.request().method() !== 'POST') return route.fallback()
+    posts++
+    return route.abort()
+  })
   await page.goto('/')
   const submit = button(page, '분석 시작')
   await expect(submit).toBeDisabled()
@@ -199,7 +207,8 @@ test('중복 업로드 차단, queued → running → completed, 완료 후 폴�
   let uploads = 0
   let postedBody = ''
   let polls = 0
-  await page.route(api + '/jobs', async route => {
+  await page.route(jobsUrl, async route => {
+    if (route.request().method() !== 'POST') return route.fallback()
     uploads++
     postedBody = route.request().postData() ?? ''
     await pendingUpload.pending
@@ -807,5 +816,367 @@ test.describe('터치 뷰포트', () => {
     await expect(button(page, '이미지 확대')).toBeFocused()
     expect(await videoTime(page)).toBe(3.5)
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390)
+  })
+})
+
+function historyItem(
+  index: number, phase: JobState = 'completed', name: string | null = `DashCam-${index}.mp4`,
+): JobHistoryItem {
+  return {
+    ...status(index === 1 ? job : `10000000-2000-4000-8000-${String(index).padStart(12, '0')}`, phase),
+    created_at: new Date(Date.UTC(2026, 10, 26, 0, 0, index)).toISOString(),
+    original_filename: name,
+    file_size_bytes: 2 * 1024 * 1024,
+    analysis: phase === 'completed' ? { video: results().video, event_count: 3, analysis_seconds: 2 } : null,
+    reviews: phase === 'completed' ? { unreviewed: 3, suspected: 0, false_positive: 0, deferred: 0, reviewed_count: 0 } : null,
+  }
+}
+
+function historyResponse(params: URLSearchParams, items: JobHistoryItem[], warnings: JobHistoryWarning[] = []): JobHistory {
+  const search = (params.get('search') ?? '').toLowerCase()
+  const phase = params.get('status')
+  const matches = items.filter(item => (!phase || item.status === phase)
+    && (!search || item.original_filename?.toLowerCase().includes(search)))
+  const direction = params.get('sort') === 'oldest' ? 1 : -1
+  matches.sort((a, b) => direction * (Date.parse(a.created_at) - Date.parse(b.created_at) || a.job_id.localeCompare(b.job_id)))
+  const limit = Number(params.get('limit'))
+  const offset = Number(params.get('offset'))
+  const pageItems = matches.slice(offset, offset + limit)
+  return { items: pageItems, total: matches.length, count: pageItems.length, limit, offset, warnings }
+}
+
+async function mockHistory(
+  page: Page,
+  read: (route: Route, params: URLSearchParams) => Promise<void> = (route, params) => json(route, historyResponse(params, [])),
+) {
+  await page.route(jobsUrl, route => route.request().method() === 'GET'
+    ? read(route, new URL(route.request().url()).searchParams) : route.fallback())
+}
+
+const historyRows = (page: Page, list = '분석 작업 목록') =>
+  page.getByRole('list', { name: list, exact: true }).locator('li.history-row')
+const historyBack = (page: Page) => page.getByRole('link', { name: '분석 이력으로', exact: true })
+const historySearch = (page: Page) => page.getByRole('searchbox', { name: '파일명 검색' })
+const nextHistoryPage = (page: Page) => button(page, '다음 페이지')
+
+test.describe('분석 이력', () => {
+  test.use({ timezoneId: 'Asia/Seoul' })
+
+  test('메인에 최신 다섯 건을 표시하고 전체 이력과 활성 메뉴로 연결한다', async ({ page }) => {
+    const items = Array.from({ length: 7 }, (_, index) => historyItem(index + 1))
+    const queries: Record<string, string>[] = []
+    await mockHistory(page, (route, params) => {
+      queries.push(Object.fromEntries(params))
+      return json(route, historyResponse(params, items))
+    })
+    await page.goto('/')
+    const menu = page.getByRole('navigation', { name: '주 메뉴' })
+    await expect(menu.getByRole('link', { name: '영상 분석' })).toHaveAttribute('aria-current', 'page')
+    const recent = historyRows(page, '최근 분석 작업 목록')
+    await expect(recent).toHaveCount(5)
+    await expect(recent.first()).toContainText('DashCam-7.mp4')
+    await expect(recent.last()).toContainText('DashCam-3.mp4')
+    await expect(recent.first()).toContainText('검토한 장면 0 / 3건')
+    await expect(recent.first().locator('time')).toHaveText(/09:00:07/)
+    expect(queries).toEqual([{ limit: '5', offset: '0', sort: 'newest' }])
+    await page.getByRole('link', { name: '전체 보기' }).click()
+    await expect(page).toHaveURL(/\/history$/)
+    await expect(menu.getByRole('link', { name: '분석 이력' })).toHaveAttribute('aria-current', 'page')
+    await expect(historyRows(page)).toHaveCount(7)
+    expect(queries.at(-1)).toEqual({ limit: '20', offset: '0', sort: 'newest' })
+  })
+
+  test('같은 파일명의 상태별 작업에 들어가고 조건을 유지한 목록으로 돌아온다', async ({ page }) => {
+    const phases = ['completed', 'queued', 'running', 'failed'] as const
+    const items = phases.map((phase, index) => historyItem(index + 1, phase, '같은 파일명.mp4'))
+    await mockHistory(page, (route, params) => json(route, historyResponse(params, items)))
+    await page.route(api + resultPath, route => json(route, results()))
+    for (const item of items) {
+      await page.route(api + '/jobs/' + item.job_id, route => json(route, status(item.job_id, item.status)))
+    }
+    await page.goto('/history?sort=oldest')
+    for (const [index, item] of items.entries()) {
+      const row = historyRows(page).nth(index)
+      await expect(row.locator('time')).toHaveText(new RegExp(`09:00:0${index + 1}`))
+      const details = row.getByRole('link')
+      await details.click()
+      const completed = item.status === 'completed'
+      await expect(page).toHaveURL(new RegExp(`/jobs/${item.job_id}${completed ? '/results' : ''}$`))
+      await expect(heading(page, completed ? '영상 분석 결과' : '영상 분석 상태')).toBeVisible()
+      await expect(page.getByText('같은 파일명.mp4', { exact: true })).toBeVisible()
+      if (item.status === 'failed') await expect(page.getByRole('alert')).toContainText('영상 분석 중 오류')
+      await historyBack(page).click()
+      await expect(page).toHaveURL(/\/history\?sort=oldest$/)
+    }
+    await page.goto(resultPath)
+    await expect(page.getByText('원본 영상', { exact: true }).first()).toBeVisible()
+    await expect(historyBack(page)).toHaveCount(0)
+  })
+
+  test('파일명 제출·상태·정렬·페이지를 URL에 저장하고 뒤로 가기와 새로고침에서 복원한다', async ({ page }) => {
+    const items = Array.from({ length: 45 }, (_, index) =>
+      historyItem(index + 1, index < 25 ? 'completed' : 'failed', `DashCam 한글 &+ ${index + 1}.mp4`))
+    const requests: Record<string, string>[] = []
+    await mockHistory(page, (route, params) => {
+      requests.push(Object.fromEntries(params))
+      return json(route, historyResponse(params, items))
+    })
+    await page.goto('/history')
+    await expect(historyRows(page)).toHaveCount(20)
+    await nextHistoryPage(page).click()
+    await expect(page.getByText('21–40건 표시')).toBeVisible()
+    expect(requests.at(-1)?.offset).toBe('20')
+
+    const search = historySearch(page)
+    await search.fill('  dashcam 한글 &+  ')
+    expect(requests).toHaveLength(2)
+    await search.press('Enter')
+    await expect(page.getByText('1–20건 표시')).toBeVisible()
+    expect(requests.at(-1)).toMatchObject({ offset: '0', search: 'dashcam 한글 &+' })
+    await nextHistoryPage(page).click()
+    await expect(page.getByText('21–40건 표시')).toBeVisible()
+    await page.getByLabel('분석 상태', { exact: true }).selectOption('completed')
+    await expect(page.getByText('전체 일치 25건')).toBeVisible()
+    expect(requests.at(-1)).toMatchObject({ offset: '0', status: 'completed' })
+
+    await nextHistoryPage(page).click()
+    await expect(page.getByText('21–25건 표시')).toBeVisible()
+    await page.getByLabel('정렬', { exact: true }).selectOption('oldest')
+    await expect(historyRows(page).first()).toContainText('DashCam 한글 &+ 1.mp4')
+    expect(requests.at(-1)).toMatchObject({ offset: '0', sort: 'oldest' })
+    await nextHistoryPage(page).click()
+    await expect(historyRows(page).first()).toContainText('DashCam 한글 &+ 21.mp4')
+    const restoredUrl = page.url()
+    await button(page, '조건 초기화').click()
+    await expect(page).toHaveURL(/\/history$/)
+    await expect(search).toHaveValue('')
+    await page.goBack()
+    await expect(page).toHaveURL(restoredUrl)
+    await expect(search).toHaveValue('dashcam 한글 &+')
+    await expect(page.getByLabel('분석 상태', { exact: true })).toHaveValue('completed')
+    await expect(page.getByLabel('정렬', { exact: true })).toHaveValue('oldest')
+    await page.reload()
+    await expect(page.getByText('21–25건 표시')).toBeVisible()
+    await expect(historyRows(page)).toHaveCount(5)
+    await button(page, '이전 페이지').click()
+    await expect(page.getByText('1–20건 표시')).toBeVisible()
+    await expect(button(page, '이전 페이지')).toBeDisabled()
+  })
+
+  test('새로고침으로 마지막 페이지가 사라지면 유효한 마지막 페이지로 복귀한다', async ({ page }) => {
+    let items = Array.from({ length: 41 }, (_, index) => historyItem(index + 1))
+    const offsets: string[] = []
+    await mockHistory(page, (route, params) => {
+      offsets.push(params.get('offset')!)
+      return json(route, historyResponse(params, items))
+    })
+    await page.goto('/history?page=3')
+    await expect(page.getByText('41–41건 표시')).toBeVisible()
+    items = items.slice(0, 24)
+    await button(page, '새로고침').click()
+    await expect(page).toHaveURL(/\/history\?page=2$/)
+    await expect(page.getByText('21–24건 표시')).toBeVisible()
+    await expect(nextHistoryPage(page)).toBeDisabled()
+    expect(offsets).toEqual(['40', '40', '20'])
+  })
+
+  test('전체 빈 이력과 조건에 맞는 결과가 없는 상태를 구분한다', async ({ page }) => {
+    await page.goto('/')
+    await expect(page.getByText('아직 분석 이력이 없습니다.', { exact: true })).toBeVisible()
+    await page.getByRole('link', { name: '전체 보기' }).click()
+    await expect(page.getByText('아직 분석 이력이 없습니다.', { exact: true })).toBeVisible()
+    await expect(page.getByText('전체 일치 0건')).toBeVisible()
+    await expect(page.getByText('표시 0건')).toBeVisible()
+    await historySearch(page).fill('일치하지 않는 이름')
+    await button(page, '검색').click()
+    await expect(page.getByText('검색 조건에 맞는 분석 이력이 없습니다.')).toBeVisible()
+    await expect(page.getByText('아직 분석 이력이 없습니다.')).toHaveCount(0)
+  })
+
+  test('연결 실패, HTTP 오류, 잘못된 응답을 구분하고 재시도할 수 있다', async ({ page }) => {
+    let reads = 0
+    const refreshing = hold()
+    await mockHistory(page, async (route, params) => {
+      if (++reads === 1) return route.abort()
+      if (reads === 2) return json(route, {}, 503)
+      if (reads === 3) return json(route, { ...historyResponse(params, [historyItem(1)]), count: 2 })
+      if (reads === 5) {
+        await refreshing.pending
+        return json(route, {}, 502)
+      }
+      return json(route, historyResponse(params, [historyItem(1)]))
+    })
+    await page.goto('/history')
+    const alert = page.getByRole('alert')
+    const retry = button(page, '다시 시도')
+    await expect(alert).toContainText('분석 서버와 연결할 수 없습니다')
+    await retry.click()
+    await expect(alert).toContainText('HTTP 503')
+    await retry.click()
+    await expect(alert).toContainText('서버 응답을 확인할 수 없습니다')
+    await retry.click()
+    await expect(historyRows(page)).toHaveCount(1)
+    try {
+      await button(page, '새로고침').click()
+      await expect(button(page, '새로고침')).toBeDisabled()
+      await expect(page.getByText('분석 이력을 다시 불러오고 있습니다.')).toBeVisible()
+      await expect(historyRows(page)).toHaveCount(1)
+    } finally {
+      refreshing.release()
+    }
+    await expect(alert).toContainText('HTTP 502')
+    await expect(alert).toContainText('마지막으로 불러온 이력을 표시합니다.')
+    await expect(historyRows(page)).toHaveCount(1)
+    await retry.click()
+    await expect(alert).toHaveCount(0)
+  })
+
+  test('이전 조건의 느린 요청을 취소하고 페이지 이탈 때 최근 이력 요청도 정리한다', async ({ page }) => {
+    const delayed = hold()
+    const slowHistory = (url: string) => jobsUrl(new URL(url)) && !new URL(url).searchParams.has('search')
+    await mockHistory(page, async (route, params) => {
+      if (!params.has('search')) await delayed.pending
+      return json(route, historyResponse(params, [historyItem(1, 'completed', 'Old.mp4'), historyItem(2, 'completed', 'New.mp4')]))
+        .catch(error => { if (params.has('search')) throw error })
+    })
+    try {
+      const started = page.waitForRequest(request => slowHistory(request.url()))
+      await page.goto('/history')
+      await started
+      await expect(page.getByText('분석 이력을 불러오고 있습니다.')).toBeVisible()
+      const cancelled = page.waitForEvent('requestfailed', req => slowHistory(req.url()))
+      await historySearch(page).fill('New')
+      await button(page, '검색').click()
+      expect((await cancelled).failure()?.errorText).toContain('ERR_ABORTED')
+      await expect(historyRows(page)).toHaveCount(1)
+      await expect(historyRows(page).first()).toContainText('New.mp4')
+
+      const homeStarted = page.waitForRequest(req => new URL(req.url()).searchParams.get('limit') === '5')
+      await page.getByRole('link', { name: '영상 분석', exact: true }).click()
+      await homeStarted
+      const homeCancelled = page.waitForEvent('requestfailed', req => new URL(req.url()).searchParams.get('limit') === '5')
+      await page.getByRole('link', { name: '전체 보기' }).click()
+      expect((await homeCancelled).failure()?.errorText).toContain('ERR_ABORTED')
+    } finally {
+      delayed.release()
+    }
+  })
+
+  test('정상 무탐지 0건과 null 요약·미완료·부분 경고를 구분한다', async ({ page }) => {
+    const zero = historyItem(1, 'completed', '무탐지.mp4')
+    zero.analysis = { ...zero.analysis!, event_count: 0, video: { ...zero.analysis!.video, duration_sec: 0 } }
+    zero.reviews = { ...zero.reviews!, unreviewed: 0 }
+    const unavailable = { ...historyItem(2, 'completed', null), analysis: null, reviews: null, file_size_bytes: null }
+    const invalidReview = { ...historyItem(3, 'completed', '검토 미확인.mp4'), reviews: null }
+    const reviewed = historyItem(4, 'completed', '검토 완료.mp4')
+    reviewed.reviews = { unreviewed: 0, suspected: 1, false_positive: 1, deferred: 1, reviewed_count: 3 }
+    const items = [zero, unavailable, invalidReview, reviewed, historyItem(5, 'running', '진행 중.mp4')]
+    const warnings = [
+      [otherJob, 'results_unavailable'], [otherJob, 'upload_size_unavailable'],
+      [invalidReview.job_id, 'review_data_invalid'], [invalidReview.job_id, 'review_read_failed'],
+      [historyItem(6).job_id, 'job_data_unavailable'],
+    ].map(([job_id, code]) => ({ job_id, error: { code, message: '테스트 경고' } }))
+    await mockHistory(page, (route, params) => json(route, historyResponse(params, items, warnings)))
+    await page.goto('/history')
+    await expect(page.getByText('전체 일치 5건')).toBeVisible()
+    const row = (name: string) => historyRows(page).filter({ has: heading(page, name) })
+    await expect(row('무탐지.mp4')).toContainText('의심 장면 0건')
+    await expect(row('무탐지.mp4')).toContainText('영상 00:00')
+    await expect(row('무탐지.mp4')).toContainText('검토한 장면 0 / 0건')
+    await expect(row('파일명 미확인')).toContainText('분석 요약 미확인')
+    await expect(row('파일명 미확인')).toContainText('파일 크기 미확인')
+    await expect(row('파일명 미확인')).not.toContainText('0건')
+    await expect(row('검토 미확인.mp4')).toContainText('의심 장면 3건')
+    await expect(row('검토 미확인.mp4')).toContainText('검토 요약 미확인')
+    await expect(row('검토 완료.mp4')).toContainText('판단 보류 1건')
+    await expect(row('검토 완료.mp4')).toContainText('검토한 장면 3 / 3건')
+    await expect(row('진행 중.mp4')).toContainText('분석 후 장면 검토 가능')
+    await expect(page.getByText('일부 이력 확인 필요')).toBeVisible()
+    await expect(page.getByText('일부 작업 정보를 읽을 수 없어 목록과 전체 건수에서 제외했습니다.')).toBeVisible()
+    await expect(page.getByText('일부 작업의 분석 및 검토 요약을 확인할 수 없습니다.')).toBeVisible()
+    await expect(page.getByText('일부 작업의 검토 데이터가 올바르지 않아 검토 요약을 확인할 수 없습니다.')).toBeVisible()
+    await expect(page.getByText('일부 작업의 검토 데이터를 읽을 수 없습니다.')).toBeVisible()
+    await expect(page.getByText('일부 작업의 파일 크기를 확인할 수 없습니다.')).toBeVisible()
+  })
+
+  test('두 번째 페이지에서 검토를 저장한 뒤 목록에 재진입하면 요약이 갱신된다', async ({ page }) => {
+    const target = historyItem(1)
+    const items = [target, ...Array.from({ length: 20 }, (_, index) => historyItem(index + 2))]
+    await mockReviews(page, {
+      async beforeSave() {
+        target.reviews = { unreviewed: 2, suspected: 0, false_positive: 0, deferred: 1, reviewed_count: 1 }
+        return true
+      },
+    })
+    await page.route(api + resultPath, route => json(route, results()))
+    await mockHistory(page, (route, params) => json(route, historyResponse(params, items)))
+    await page.goto('/history?search=dashcam&status=completed&page=2')
+    const originalUrl = page.url()
+    const row = historyRows(page).first()
+    await expect(row).toContainText('검토한 장면 0 / 3건')
+    await row.getByRole('link', { name: /결과 확인/ }).click()
+    await reviewRadio(page, '판단 보류').click()
+    await expect(page.getByTestId('review-count')).toHaveText('1 / 3')
+    await expect(page.getByText('저장 완료 · 판단 보류')).toBeVisible()
+    await historyBack(page).click()
+    await expect(page).toHaveURL(originalUrl)
+    await expect(row).toContainText('검토한 장면 1 / 3건')
+    await expect(row).toContainText('판단 보류 1건')
+  })
+
+  test('모바일에서 긴 한글·영문 파일명을 줄바꿈하고 입력과 메뉴의 키보드 사용을 지원한다', async ({ page }) => {
+    const names = ['긴파일명'.repeat(40) + '.mp4', 'LongRunName'.repeat(18) + '.mp4']
+    await mockHistory(page, (route, params) => json(route, historyResponse(params, names.map((name, index) => historyItem(index + 1, 'completed', name)))))
+    await page.setViewportSize({ width: 320, height: 740 })
+    await page.goto('/')
+    await expect(historyRows(page, '최근 분석 작업 목록')).toHaveCount(2)
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(320)
+    await page.getByRole('link', { name: '전체 보기' }).click()
+    for (const name of names) await expect(heading(page, name)).toBeVisible()
+    const search = historySearch(page)
+    await search.focus()
+    await page.keyboard.press('Tab')
+    await expect(button(page, '검색')).toBeFocused()
+    expect(await button(page, '검색').evaluate(element => getComputedStyle(element).outlineStyle)).toBe('solid')
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(320)
+    await page.setViewportSize({ width: 390, height: 844 })
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390)
+  })
+
+  test('예시를 실행해도 실제 이력에는 작업이 추가되지 않는다', async ({ page }) => {
+    const reads: string[] = []
+    await mockHistory(page, (route, params) => {
+      reads.push(params.get('limit')!)
+      return json(route, historyResponse(params, [historyItem(1, 'completed', '실제 목록 작업.mp4')]))
+    })
+    await page.goto('/')
+    await expect(historyRows(page, '최근 분석 작업 목록')).toHaveCount(1)
+    await page.getByRole('link', { name: '예시 화면 보기' }).click()
+    await expect(page).toHaveURL(/\/examples\//)
+    await expect(page.getByText('개발용 예시 모드')).toBeVisible()
+    expect(reads).toEqual(['5'])
+    await page.getByRole('link', { name: '분석 이력', exact: true }).click()
+    await expect(historyRows(page)).toHaveCount(1)
+    await expect(historyRows(page).first()).toContainText('실제 목록 작업.mp4')
+    expect(reads).toEqual(['5', '20'])
+  })
+
+  test('최근 이력 연결 실패와 무관하게 파일을 선택하고 POST 업로드한다', async ({ page }) => {
+    let uploads = 0
+    await mockHistory(page, route => route.abort())
+    await page.route(jobsUrl, route => {
+      if (route.request().method() !== 'POST') return route.fallback()
+      uploads++
+      return json(route, status(job, 'queued'), 202)
+    })
+    await page.route(api + jobPath, route => json(route, status(job, 'queued')))
+    await page.goto('/')
+    await expect(page.getByText('분석 이력을 불러오지 못했습니다.')).toBeVisible()
+    await fileInput(page).setInputFiles(mp4('독립 업로드.mp4'))
+    await expect(button(page, '분석 시작')).toBeEnabled()
+    await button(page, '분석 시작').click()
+    await expect(page.getByText('독립 업로드.mp4', { exact: true })).toBeVisible()
+    await expect(page).toHaveURL(new RegExp(jobPath + '$'))
+    expect(uploads).toBe(1)
   })
 })

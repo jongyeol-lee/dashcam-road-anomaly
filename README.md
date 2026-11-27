@@ -177,4 +177,6 @@ curl.exe --silent --range 0-1023 --dump-header - --output NUL "$api/api/jobs/$jo
 
 `GET /api/jobs`는 저장된 작업을 최신순으로 조회하며 상태 필터, 파일명 부분 검색, 정렬, 페이지네이션을 지원합니다. 완료 작업의 의심 장면 수와 사용자 검토 요약을 함께 반환합니다. 이전 작업의 원본 파일명은 확인할 수 없으면 null입니다. [이력 API 계약](docs/api_contract.md#분석-이력) · [실제 전·후방 작업 검증](docs/experiments/part6_job_history_api.md)
 
+메인 화면의 **최근 분석 이력**에는 최신 작업 5건까지 표시됩니다. **분석 이력**(`/history`)에서는 파일명과 상태로 작업을 찾고, 결과 또는 분석 상태를 다시 열 수 있습니다. 목록에 돌아오면 URL에 저장된 조회 조건을 복원하고 최신 검토 집계를 불러옵니다. [이력 화면 구현과 검증](docs/experiments/part6_job_history_ui.md)
+
 CORS는 `http://localhost:5173`, `http://127.0.0.1:5173`만 허용합니다. 인증이 없는 로컬 단일 사용자 MVP이며 외부 인터넷에 공개하지 않습니다. 임시 Ultralytics·Matplotlib 설정과 오프라인·자동 설치 금지를 유지합니다. [React 실행과 테스트](frontend/README.md)

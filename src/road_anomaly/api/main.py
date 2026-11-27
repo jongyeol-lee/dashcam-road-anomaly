@@ -10,13 +10,14 @@ from uuid import UUID, uuid4
 from fastapi import FastAPI, File, Path as PathParameter, Query, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException
 
 from .jobs import ApiSettings, JobError, JobManager, contained_path, validate_upload
+from .reports import XLSX_MIME, report_csv, report_xlsx
 from .schemas import (
-    AnalysisResults, ErrorResponse, EVENT_ID_PATTERN, JobHistory, JobHistoryQuery, JobReviews, JobStatus,
+    AnalysisResults, ErrorResponse, EVENT_ID_PATTERN, JobHistory, JobHistoryQuery, JobReport, JobReviews, JobStatus,
     ReviewUpdate, SceneReview, normalize_upload_filename,
 )
 
@@ -165,6 +166,27 @@ def create_app(settings: ApiSettings | None = None, *, analyzer=None) -> FastAPI
     @app.get("/api/jobs/{job_id}/results", response_model=AnalysisResults)
     def results(job_id: UUID):
         return manager.results(job_id)
+
+    @app.get("/api/jobs/{job_id}/report", response_model=JobReport)
+    def job_report(job_id: UUID, response: Response):
+        response.headers["Cache-Control"] = "no-store"
+        return manager.report(job_id)
+
+    @app.get("/api/jobs/{job_id}/exports/csv", response_class=Response,
+             responses={200: {"content": {"text/csv": {"schema": {"type": "string", "format": "binary"}}}}})
+    def export_csv(job_id: UUID):
+        return Response(report_csv(manager.report(job_id)), media_type="text/csv", headers={
+            "Content-Disposition": f'attachment; filename="road-anomaly-{job_id}.csv"',
+            "Cache-Control": "no-store",
+        })
+
+    @app.get("/api/jobs/{job_id}/exports/xlsx", response_class=Response,
+             responses={200: {"content": {XLSX_MIME: {"schema": {"type": "string", "format": "binary"}}}}})
+    def export_xlsx(job_id: UUID):
+        return Response(report_xlsx(manager.report(job_id)), media_type=XLSX_MIME, headers={
+            "Content-Disposition": f'attachment; filename="road-anomaly-{job_id}.xlsx"',
+            "Cache-Control": "no-store",
+        })
 
     @app.get("/api/jobs/{job_id}/reviews", response_model=JobReviews)
     def reviews(job_id: UUID):

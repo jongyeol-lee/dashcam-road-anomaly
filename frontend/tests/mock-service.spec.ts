@@ -1,6 +1,7 @@
 import { expect, test, type Page, type Route } from '@playwright/test'
+import { readFile } from 'node:fs/promises'
 import type {
-  AnalysisResults, JobHistory, JobHistoryItem, JobHistoryWarning, JobState, ReviewState, Scene, SceneReview,
+  AnalysisResults, JobHistory, JobHistoryItem, JobHistoryWarning, JobReport, JobState, ReviewState, Scene, SceneReview,
 } from '../src/api/types'
 
 const api = 'http://127.0.0.1:8000/api'
@@ -92,7 +93,7 @@ async function mockReviews(page: Page, options: {
     stored.set(id, [...(stored.get(id) ?? []).filter(item => item.event_id !== event_id), entry])
     return json(route, entry)
   })
-  return { gets, puts }
+  return { gets, puts, stored }
 }
 
 const fileInput = (page: Page) => page.locator('input[type=file]')
@@ -1178,5 +1179,289 @@ test.describe('분석 이력', () => {
     await expect(page.getByText('독립 업로드.mp4', { exact: true })).toBeVisible()
     await expect(page).toHaveURL(new RegExp(jobPath + '$'))
     expect(uploads).toBe(1)
+  })
+})
+
+const reportPath = jobPath + '/report'
+const csvPath = jobPath + '/exports/csv'
+const xlsxPath = jobPath + '/exports/xlsx'
+const xlsxMime = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+const csvButton = (page: Page) => button(page, '전체 장면 CSV 다운로드')
+const xlsxButton = (page: Page) => button(page, '전체 장면 Excel 다운로드')
+const reportLink = (page: Page) => page.getByRole('link', { name: 'PDF 리포트 보기' })
+const printButton = (page: Page) => button(page, 'PDF로 저장 / 인쇄')
+
+function reportFixture(events = scenes, entries: SceneReview[] = [], filename: string | null = '한글 전방.mp4'): JobReport {
+  const summary = { unreviewed: events.length, suspected: 0, false_positive: 0, deferred: 0, reviewed_count: 0 }
+  for (const { review } of entries) {
+    if (review === 'unreviewed') continue
+    summary[review]++
+    summary.reviewed_count++
+    summary.unreviewed--
+  }
+  return {
+    job: { ...status(job, 'completed'), original_filename: filename, file_size_bytes: 10 },
+    results: results(events), reviews: { job_id: job, reviews: entries }, review_summary: summary, exported_at: timestamp,
+  }
+}
+
+function mockCsv(route: Route, events = scenes, entries: SceneReview[] = []) {
+  const body = '\uFEFFevent_id,review_state\r\n' + events.map(scene =>
+    `${scene.event_id},${entries.find(entry => entry.event_id === scene.event_id)?.review ?? 'unreviewed'}\r\n`).join('')
+  return route.fulfill({ contentType: 'text/csv; charset=utf-8', body, headers: { 'access-control-allow-origin': '*' } })
+}
+
+async function downloadCsv(page: Page) {
+  const started = page.waitForEvent('download')
+  await csvButton(page).click()
+  const download = await started
+  expect(download.suggestedFilename()).toBe(`road-anomaly-${job}.csv`)
+  expect(await download.failure()).toBeNull()
+  return readFile(await download.path(), 'utf8')
+}
+
+test.describe('분석 리포트', () => {
+  test('문서에 보조 요소가 추가돼도 인쇄에서 기본 용지로 전환된 마지막 페이지가 생기지 않는다', async ({ page }) => {
+    await page.route(api + reportPath, route => json(route, reportFixture()))
+    await page.goto(reportPath)
+    await expect(printButton(page)).toBeEnabled()
+    const mediaBoxes = async () => (await page.pdf({ preferCSSPageSize: true }))
+      .toString('latin1').match(/^\/MediaBox \[[^\n]+/gm)
+    const clean = await mediaBoxes()
+    expect(clean?.length).toBeGreaterThan(0)
+    await page.evaluate(() => {
+      // 브라우저 확장이 앱 루트 뒤에 추가하는 보조 노드를 재현한다.
+      const control = document.createElement('div')
+      control.style.height = '1px'
+      control.setAttribute('aria-hidden', 'true')
+      document.body.append(control)
+    })
+    expect(await mediaBoxes()).toEqual(clean)
+  })
+
+  test('모바일에서 필터와 관계없이 Excel 파일을 받고 CSV·PDF 진입도 유지한다', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 })
+    await page.route(api + resultPath, route => json(route, results()))
+    // 브라우저 다운로드 전달만 검증하고 XLSX 구조는 Python과 실제 Excel에서 검증한다.
+    const payload = Buffer.from([0x50, 0x4b, 0x03, 0x04, 0, 0xff])
+    const requests: string[] = []
+    await page.route(`${api}${xlsxPath}**`, route => {
+      requests.push(route.request().url())
+      return route.fulfill({ contentType: xlsxMime, body: payload, headers: { 'access-control-allow-origin': '*' } })
+    })
+    await page.goto(resultPath)
+    await page.getByLabel('탐지 종류').selectOption('D40')
+    await expect(rows(page)).toHaveCount(1)
+    await expect(page.getByText(/전체 의심 장면 3건을 내보냅니다/)).toBeVisible()
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390)
+    const started = page.waitForEvent('download')
+    await xlsxButton(page).click()
+    const file = await started
+    expect(file.suggestedFilename()).toBe(`road-anomaly-${job}.xlsx`)
+    expect(await file.failure()).toBeNull()
+    expect(await readFile(await file.path())).toEqual(payload)
+    expect(requests).toEqual([api + xlsxPath])
+    await expect(csvButton(page)).toBeEnabled()
+    await expect(reportLink(page)).toBeVisible()
+  })
+
+  test('Excel의 저장 검토 조회 오류와 잘못된 응답을 알리고 같은 버튼에서 재시도한다', async ({ page }) => {
+    await page.route(api + resultPath, route => json(route, results()))
+    let requests = 0
+    await page.route(api + xlsxPath, route => {
+      if (++requests === 1) return json(route, { error: { code: 'review_data_invalid', message: '오류' } }, 500)
+      if (requests === 2) return json(route, { unexpected: true })
+      return route.fulfill({ contentType: xlsxMime, body: Buffer.from([0x50, 0x4b]), headers: { 'access-control-allow-origin': '*' } })
+    })
+    await page.goto(resultPath)
+    await xlsxButton(page).click()
+    await expect(page.getByRole('alert')).toContainText(/Excel 파일을 다운로드하지 못했습니다.*저장된 검토 데이터를 확인할 수 없습니다/)
+    await xlsxButton(page).click()
+    await expect(page.getByRole('alert')).toContainText('서버 응답을 확인할 수 없습니다.')
+    const downloading = page.waitForEvent('download')
+    await xlsxButton(page).click()
+    expect(await (await downloading).failure()).toBeNull()
+    await expect(page.getByRole('alert')).toHaveCount(0)
+  })
+
+  test('이력에서 결과를 열고 필터와 관계없이 전체 CSV를 내려받은 뒤 리포트에서 돌아온다', async ({ page }) => {
+    await mockHistory(page, (route, params) => json(route, historyResponse(params, [historyItem(1)])))
+    await page.route(api + resultPath, route => json(route, results()))
+    let csvRequests = 0
+    await page.route(api + csvPath, route => { csvRequests++; return mockCsv(route) })
+    await page.route(api + reportPath, route => json(route, reportFixture()))
+    await page.goto('/history?search=DashCam')
+    await historyRows(page).first().getByRole('link', { name: /결과 확인/ }).click()
+    await page.getByLabel('탐지 종류').selectOption('D40')
+    await expect(rows(page)).toHaveCount(1)
+    await expect(page.getByText('화면 필터와 관계없이 전체 의심 장면 3건을 내보냅니다.')).toBeVisible()
+    const csv = await downloadCsv(page)
+    expect(csv).toBe('\uFEFFevent_id,review_state\r\nevent_0001,unreviewed\r\nevent_0002,unreviewed\r\nevent_0003,unreviewed\r\n')
+    expect(csvRequests).toBe(1)
+    await reportLink(page).click()
+    await expect(page).toHaveURL(reportPath)
+    await expect(page.getByRole('article')).toHaveCount(3)
+    await page.getByRole('link', { name: '결과 화면으로 돌아가기' }).click()
+    await expect(page).toHaveURL(resultPath)
+    await historyBack(page).click()
+    await expect(page).toHaveURL('/history?search=DashCam')
+  })
+
+  test('직접 주소에서 저장된 파일명·분석·검토를 표시하고 이미지가 준비되면 인쇄를 호출한다', async ({ page }) => {
+    await page.addInitScript(() => { window.print = () => { document.documentElement.dataset.printCalled = 'yes' } })
+    await page.route(api + reportPath, route => json(route, reportFixture(scenes, [
+      { event_id: 'event_0002', review: 'deferred', updated_at: timestamp },
+    ])))
+    await page.goto(reportPath)
+    await expect(heading(page, '영상 분석 리포트')).toBeVisible()
+    await expect(page.getByText('한글 전방.mp4', { exact: true })).toBeVisible()
+    await expect(page.getByRole('region', { name: 'AI 분석 요약' })).toContainText('40장')
+    await expect(page.getByRole('region', { name: '사용자 검토 요약' })).toContainText('1 / 3건')
+    const scene = page.getByRole('article', { name: 'event_0002' })
+    await expect(scene.getByRole('img')).toBeVisible()
+    await expect(scene).toContainText('00:08')
+    await expect(scene).toContainText('포트홀 (D40)')
+    await expect(scene).toContainText('0.80')
+    await expect(scene).toContainText('판단 보류')
+    await expect(page.getByText(/외부 공유 전 사용 권한과 비식별화/)).toBeVisible()
+    const printNotice = page.getByRole('complementary', { name: '인쇄 및 공유 안내' })
+    await expect(printNotice).toContainText('머리글과 바닥글을 해제하세요.')
+    await printButton(page).click()
+    await expect(page.locator('html')).toHaveAttribute('data-print-called', 'yes')
+    await page.emulateMedia({ media: 'print' })
+    await expect(page.getByRole('navigation', { name: '주 메뉴' })).toBeHidden()
+    await expect(printButton(page)).toBeHidden()
+    await expect(printNotice).toBeHidden()
+    await expect(scene).toBeVisible()
+    await expect(page.getByText(/공식 도로 안전 진단/)).toBeVisible()
+  })
+
+  test('검토 저장 중에는 내보내기를 막고 저장한 값과 최신 조회 시점의 상태를 반영한다', async ({ page }) => {
+    const saveStarted = hold()
+    const allowSave = hold()
+    const { stored } = await mockReviews(page, { beforeSave: async () => {
+      saveStarted.release()
+      await allowSave.pending
+      return true
+    } })
+    await page.route(api + resultPath, route => json(route, results()))
+    await page.route(api + csvPath, route => mockCsv(route, scenes, stored.get(job)))
+    await page.route(api + reportPath, route => json(route, reportFixture(scenes, stored.get(job))))
+    await page.goto(resultPath)
+    await reviewRadio(page, '파손 의심').click()
+    await saveStarted.pending
+    await expect(csvButton(page)).toBeDisabled()
+    await expect(xlsxButton(page)).toBeDisabled()
+    await expect(button(page, 'PDF 리포트 보기')).toBeDisabled()
+    await expect(page.getByText('검토 데이터 준비가 끝나면 내보낼 수 있습니다.')).toBeVisible()
+    allowSave.release()
+    await expect(csvButton(page)).toBeEnabled()
+    await expect(xlsxButton(page)).toBeEnabled()
+    expect(await downloadCsv(page)).toContain('event_0001,suspected')
+    await reportLink(page).click()
+    await expect(page.getByRole('article', { name: 'event_0001' })).toContainText('파손 의심')
+    stored.set(job, [{ event_id: 'event_0001', review: 'deferred', updated_at: timestamp }])
+    await expect(page.getByRole('article', { name: 'event_0001' })).toContainText('파손 의심')
+    await button(page, '최신 리포트 다시 불러오기').click()
+    await expect(page.getByRole('article', { name: 'event_0001' })).toContainText('판단 보류')
+  })
+
+  test('검토 저장 실패 시 마지막 저장값을 내보내고 CSV 실패는 버튼으로 재시도한다', async ({ page }) => {
+    const initial: SceneReview[] = [{ event_id: 'event_0001', review: 'suspected', updated_at: timestamp }]
+    const { stored } = await mockReviews(page, { initial: { [job]: initial }, beforeSave: async () => false })
+    await page.route(api + resultPath, route => json(route, results()))
+    let attempts = 0
+    await page.route(api + csvPath, route => ++attempts === 1
+      ? json(route, { error: { code: 'review_read_failed', message: '오류' } }, 500)
+      : mockCsv(route, scenes, stored.get(job)))
+    await page.route(api + reportPath, route => json(route, reportFixture(scenes, stored.get(job))))
+    await page.goto(resultPath)
+    await reviewRadio(page, '오탐').click()
+    await expect(page.getByText(/리포트에는 마지막으로 저장된 검토 상태/)).toBeVisible()
+    await csvButton(page).click()
+    await expect(page.getByText(/CSV를 다운로드하지 못했습니다.*검토 데이터를 읽을 수 없습니다/)).toBeVisible()
+    expect(await downloadCsv(page)).toContain('event_0001,suspected')
+    await reportLink(page).click()
+    await expect(page.getByRole('article', { name: 'event_0001' })).toContainText('파손 의심')
+  })
+
+  test('정상 무탐지에서 헤더 전용 CSV와 인쇄 가능한 0건 리포트를 제공한다', async ({ page }) => {
+    await page.route(api + resultPath, route => json(route, results([])))
+    await page.route(api + csvPath, route => mockCsv(route, []))
+    await page.route(api + reportPath, route => json(route, reportFixture([], [], null)))
+    await page.goto(resultPath)
+    await expect(page.getByText('CSV에는 열 제목만 포함됩니다.')).toBeVisible()
+    await expect(page.getByText(/Excel에는 열 제목과 서식이 포함됩니다/)).toBeVisible()
+    await expect(xlsxButton(page)).toBeEnabled()
+    expect(await downloadCsv(page)).toBe('\uFEFFevent_id,review_state\r\n')
+    await reportLink(page).click()
+    await expect(page.getByText('파일명 미확인', { exact: true })).toBeVisible()
+    await expect(page.getByText('AI가 검토할 의심 장면을 찾지 못했습니다. 전체 의심 장면 0건입니다.')).toBeVisible()
+    await expect(page.getByRole('article')).toHaveCount(0)
+    await expect(printButton(page)).toBeEnabled()
+  })
+
+  test('손상된 검토 응답과 갱신 실패에서 완전한 리포트를 표시하지 않고 다시 조회한다', async ({ page }) => {
+    let requests = 0
+    await page.route(api + reportPath, route => ++requests % 2 === 1
+      ? json(route, { error: { code: 'review_data_invalid', message: '오류' } }, 500) : json(route, reportFixture()))
+    await page.goto(reportPath)
+    await expect(page.getByRole('alert')).toContainText('저장된 검토 데이터를 확인할 수 없습니다.')
+    await expect(printButton(page)).toHaveCount(0)
+    await button(page, '리포트 다시 불러오기').click()
+    await expect(printButton(page)).toBeEnabled()
+    await button(page, '최신 리포트 다시 불러오기').click()
+    await expect(page.getByRole('alert')).toBeVisible()
+    await expect(page.getByRole('article')).toHaveCount(0)
+  })
+
+  test('이미지가 지연되거나 실패하면 인쇄를 막고 실패한 이미지만 다시 요청한다', async ({ page }) => {
+    const allowImage = hold()
+    let failedRequests = 0
+    let otherRequests = 0
+    await page.route(api + reportPath, route => json(route, reportFixture()))
+    await page.route(api + '/jobs/*/scenes/*', async route => {
+      if (new URL(route.request().url()).pathname.endsWith('event_0002')) {
+        if (++failedRequests === 1) {
+          await allowImage.pending
+          return route.abort()
+        }
+        expect(new URL(route.request().url()).searchParams.has('retry')).toBe(true)
+      } else otherRequests++
+      return route.fulfill({ contentType: 'image/png', body: scenePng })
+    })
+    await page.goto(reportPath, { waitUntil: 'domcontentloaded' })
+    await expect(printButton(page)).toBeDisabled()
+    await expect(page.getByText(/인쇄에 필요한 대표 이미지/)).toBeVisible()
+    allowImage.release()
+    await expect(page.getByRole('alert')).toContainText('대표 이미지 1개를 불러오지 못했습니다.')
+    await expect(printButton(page)).toBeDisabled()
+    await page.emulateMedia({ media: 'print' })
+    await expect(page.getByText(/인쇄 준비가 필요합니다/)).toBeVisible()
+    await expect(page.getByRole('article')).toHaveCount(0)
+    await page.emulateMedia({ media: 'screen' })
+    await button(page, '대표 이미지 다시 불러오기').click()
+    await expect(printButton(page)).toBeEnabled()
+    expect(failedRequests).toBe(2)
+    expect(otherRequests).toBe(2)
+  })
+
+  test('긴 한글 파일명이 모바일에서 넘치지 않고 예시 결과는 실제 내보내기와 분리된다', async ({ page }) => {
+    const filename = '실제혼합형LongFilename'.repeat(12) + '.mp4'
+    let reports = 0
+    await page.route(api + '/jobs/*/report', route => { reports++; return json(route, reportFixture(scenes, [], filename)) })
+    await page.setViewportSize({ width: 390, height: 844 })
+    await page.goto(reportPath)
+    await expect(page.getByText(filename, { exact: true })).toBeVisible()
+    await expect(printButton(page)).toBeEnabled()
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390)
+    await page.goto('/examples/jobs/00000000-0000-4000-8000-000000000001/results')
+    await expect(heading(page, '영상 분석 결과')).toBeVisible()
+    await expect(csvButton(page)).toHaveCount(0)
+    await expect(xlsxButton(page)).toHaveCount(0)
+    await expect(reportLink(page)).toHaveCount(0)
+    await page.goto('/examples/jobs/00000000-0000-4000-8000-000000000001/report')
+    await expect(heading(page, '페이지를 찾을 수 없습니다')).toBeVisible()
+    expect(reports).toBe(1)
   })
 })

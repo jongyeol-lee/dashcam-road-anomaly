@@ -10,11 +10,15 @@ export type ReviewChange =
 
 const pendingSaves = new Map<string, Promise<SceneReview>>()
 
-async function loadReviews(jobId: string, signal: AbortSignal) {
+export async function waitForPendingReviews(jobId: string, signal: AbortSignal) {
   // 같은 작업에 다시 들어오면 이전 화면에서 시작한 저장이 끝난 뒤 조회한다.
-  const saves = [...pendingSaves].filter(([key]) => key.startsWith(`${jobId}/`)).map(([, save]) => save)
+  const saves = [...pendingSaves].filter(([key]) => key.startsWith(`${jobId.toLowerCase()}/`)).map(([, save]) => save)
   await Promise.allSettled(saves)
   signal.throwIfAborted()
+}
+
+async function loadReviews(jobId: string, signal: AbortSignal) {
+  await waitForPendingReviews(jobId, signal)
   return getReviews(jobId, signal)
 }
 

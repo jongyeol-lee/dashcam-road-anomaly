@@ -1,5 +1,6 @@
 // schemas.py의 응답 모델을 기준으로 유지한다. 분석 결과와 사용자 검토는 별도 API로 조회한다.
 export type JobState = 'queued' | 'running' | 'completed' | 'failed'
+export type JobExportFormat = 'csv' | 'xlsx'
 export type ClassCode = 'D00' | 'D10' | 'D20' | 'D40'
 export type ReviewState = 'unreviewed' | 'suspected' | 'false_positive' | 'deferred'
 export interface SceneReview {
@@ -92,4 +93,12 @@ export interface AnalysisResults {
   settings: { [key: string]: JsonValue }
   timestamp_basis: string
   events: Scene[]
+}
+
+export interface JobReport {
+  job: JobStatus & { original_filename: string | null; file_size_bytes: number | null }
+  results: AnalysisResults
+  reviews: JobReviews
+  review_summary: ReviewSummary
+  exported_at: string
 }

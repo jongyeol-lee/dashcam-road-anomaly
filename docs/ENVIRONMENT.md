@@ -179,3 +179,7 @@ AI 패키지는 `torch 2.14.1+cu130`, `torchvision 0.29.1+cu130`, `ultralytics 8
 ```
 
 `pip check`는 `No broken requirements found.`, 전체 테스트는 151개 통과입니다. 실제 MP4의 전체 디코딩과 69개 샘플 추론, HTTP Range·JPEG 조회도 성공했습니다. Starlette 1.10.0 TestClient는 기존 httpx 사용에 대해 httpx2 전환 예정 경고를 내지만 현재 테스트는 통과합니다. 경고를 숨기거나 불필요한 패키지를 추가하지 않았습니다. [실측 결과와 한계](experiments/part6_fastapi_backend.md)
+
+## Part 6.4-3 Excel 내보내기 의존성
+
+**2026-11-27 (KST)** · Windows의 기존 Python 3.14.5 가상환경에서 `openpyxl`과 `et-xmlfile`이 미설치임을 확인했다. PyPI의 순수 Python wheel을 미리 확인한 뒤 `openpyxl 3.1.5`와 그 필수 의존성 `et-xmlfile 2.0.0`만 설치했다. 두 버전을 `requirements-web.txt`에 고정했다. 패키지 설치 출력에서 기존 패키지 교체는 없었으며 `pip check`와 Python 회귀 181개를 통과했다. XLSX에서 날짜·서식·필터를 생성하고 Windows Excel 16.0에서 열었다. [openpyxl 배포본](https://pypi.org/project/openpyxl/3.1.5/) · [실측 결과](experiments/part6_report_export.md#사용자-재검토-후-2차-개선)

@@ -52,7 +52,8 @@ export function HistoryPage() {
   }
 
   function reset() {
-    setDraft({ committed: search, value: '' })
+    // 검색 조건이 바뀌면 실제 URL 전환이 적용될 때 입력칸을 갱신한다.
+    if (!search) setDraft({ committed: search, value: '' })
     update({ nextSearch: '', nextStatus: '', nextSort: 'newest' })
   }
 
@@ -69,7 +70,7 @@ export function HistoryPage() {
     <form className="panel history-filters" onSubmit={event => {
       event.preventDefault()
       const nextSearch = normalizeSearch(draft.value)
-      setDraft({ committed: search, value: nextSearch })
+      if (nextSearch === search) setDraft({ committed: search, value: nextSearch })
       update({ nextSearch })
     }}>
       <div className="history-search">

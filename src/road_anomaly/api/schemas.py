@@ -140,6 +140,17 @@ class ReviewSummary(ResponseModel):
     reviewed_count: int = Field(ge=0)
 
 
+REPORT_SETTING_FIELDS = ("imgsz", "conf", "iou", "interval_sec", "max_gap_sec", "max_event_duration_sec")
+
+
+class JobReport(ResponseModel):
+    job: StoredJob
+    results: AnalysisResults
+    reviews: JobReviews
+    review_summary: ReviewSummary
+    exported_at: AwareDatetime
+
+
 class JobHistoryItem(StoredJob):
     analysis: JobAnalysisSummary | None = None
     reviews: ReviewSummary | None = None

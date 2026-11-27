@@ -7,6 +7,7 @@ import { useJobQuery } from '../api/useJobQuery'
 import { Button, EmptyState, HistoryBackLink, JobInfo, JobNotice, StatusBadge } from '../components/ui'
 import { CLASS_LABELS, REVIEW_LABELS } from '../config/service'
 import { useSession } from '../mocks/SessionContext'
+import { ResultExports } from '../features/results/ResultExports'
 import { ReviewFeedback, SceneDetail } from '../features/results/SceneDetail'
 import { SceneImage } from '../features/results/SceneImage'
 import { Timeline } from '../features/results/Timeline'
@@ -168,6 +169,9 @@ function ResultsWorkspace({
       ['AI 영상 분석 시간', `${result.analysis_seconds.toLocaleString()}초`, '업로드·대기 제외'],
     ].map(([label, value, help]) => <div className="summary-item" key={label}><span>{label}</span><strong>{value}</strong><small>{help}</small></div>)}</section>
     <p className="summary-caption"><Info size={15} aria-hidden="true" />박스·구간 수는 실제 파손 개수가 아닙니다.{example && ' 이 화면의 수치와 장면은 예시입니다.'}</p>
+    {!example && <ResultExports jobId={result.job_id} eventCount={result.event_count}
+      saving={(!jobReviews && !reviewError) || Object.values(reviewChanges ?? {}).some(change => change?.status === 'saving')}
+      failed={Object.values(reviewChanges ?? {}).some(change => change?.status === 'failed')} />}
     <div className="workspace-grid"><div className="workspace-main">
       <section className="panel video-panel">
         <div className="panel-heading"><h2><ScanLine size={17} aria-hidden="true" />원본 영상</h2></div>

@@ -1,7 +1,7 @@
 import { API_BASE, CLASS_LABELS, REVIEW_LABELS } from '../config/service'
 import type {
   AnalysisResults, ErrorResponse, JobAnalysisSummary, JobHistory, JobHistoryItem, JobHistoryQuery,
-  JobReviews, JobStatus, ReviewState, ReviewSummary, Scene, SceneReview,
+  JobExportFormat, JobReport, JobReviews, JobStatus, ReviewState, ReviewSummary, Scene, SceneReview,
 } from './types'
 
 const errorMessages: Record<string, string> = {
@@ -18,6 +18,8 @@ const errorMessages: Record<string, string> = {
   review_data_invalid: '저장된 검토 데이터를 확인할 수 없습니다.',
   review_read_failed: '검토 데이터를 읽을 수 없습니다.',
   review_save_failed: '서버가 검토 결과를 저장하지 못했습니다.',
+  job_data_unavailable: '저장된 작업 정보를 확인할 수 없습니다.',
+  results_unavailable: '저장된 분석 결과를 확인할 수 없습니다.',
   internal_error: '서버 처리 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.',
 }
 
@@ -154,17 +156,45 @@ function isResults(value: unknown, jobId: string): value is AnalysisResults {
     && Array.isArray(value.events) && value.event_count === value.events.length && value.events.every(isScene)
 }
 
+function isJobReport(value: unknown, jobId: string): value is JobReport {
+  if (!isRecord(value) || !isRecord(value.job) || !isJobStatus(value.job)
+    || value.job.job_id !== jobId.toLowerCase() || value.job.status !== 'completed'
+    || !isHistoryTimestamp(value.job.created_at)
+    || (value.job.started_at !== null && !isHistoryTimestamp(value.job.started_at))
+    || (value.job.finished_at !== null && !isHistoryTimestamp(value.job.finished_at))
+    || (value.job.original_filename !== null && typeof value.job.original_filename !== 'string')
+    || (value.job.file_size_bytes !== null && !isCount(value.job.file_size_bytes))
+    || typeof value.exported_at !== 'string' || !isHistoryTimestamp(value.exported_at)
+    || !isResults(value.results, jobId) || !isJobReviews(value.reviews, jobId)
+    || !isReviewSummary(value.review_summary)) return false
+
+  const events = value.results.events
+  const eventIds = new Set(events.map(scene => scene.event_id))
+  const root = `/api/jobs/${value.job.job_id}`
+  if (eventIds.size !== events.length || value.results.video_url !== `${root}/video`
+    || events.some(scene => scene.image_url !== `${root}/scenes/${scene.event_id}`)
+    || value.reviews.reviews.some(entry => !eventIds.has(entry.event_id))) return false
+
+  const counts: ReviewSummary = { unreviewed: events.length, suspected: 0, false_positive: 0, deferred: 0, reviewed_count: 0 }
+  for (const { review } of value.reviews.reviews) {
+    if (review === 'unreviewed') continue
+    counts[review]++
+    counts.reviewed_count++
+    counts.unreviewed--
+  }
+  const summary = value.review_summary
+  return (Object.keys(counts) as (keyof ReviewSummary)[]).every(key => counts[key] === summary[key])
+}
+
 function unexpectedResponse() {
   return new ApiRequestError('서버 응답을 확인할 수 없습니다. 잠시 후 다시 시도해 주세요.', 'response')
 }
 
-async function request<T>(
-  path: string,
-  options: RequestInit,
-  expectedStatus: number,
-  isExpected: (value: unknown) => value is T,
-): Promise<T> {
-  const networkError = () => new ApiRequestError('분석 서버와 연결할 수 없습니다. 서버 연결을 확인해 주세요.', 'network')
+function networkError() {
+  return new ApiRequestError('분석 서버와 연결할 수 없습니다. 서버 연결을 확인해 주세요.', 'network')
+}
+
+async function requestResponse(path: string, options: RequestInit, expectedStatus: number): Promise<Response> {
   let response: Response
   try {
     response = await fetch(apiUrl(path), options)
@@ -173,19 +203,27 @@ async function request<T>(
     throw networkError()
   }
 
+  if (!response.ok) {
+    const body: unknown = await response.json().catch(() => { options.signal?.throwIfAborted() })
+    // 오류 계약의 코드를 사용해 화면에 표시할 문구를 선택한다.
+    const message = isErrorResponse(body) ? apiErrorMessage(body.error.code) : undefined
+    throw new ApiRequestError(message ?? `요청을 처리할 수 없습니다 (HTTP ${response.status}).`, 'http', response.status)
+  }
+  if (response.status !== expectedStatus) throw unexpectedResponse()
+  return response
+}
+
+async function request<T>(path: string, options: RequestInit, expectedStatus: number,
+  isExpected: (value: unknown) => value is T): Promise<T> {
+  const response = await requestResponse(path, options, expectedStatus)
   let body: unknown
   try {
     body = await response.json()
   } catch (error) {
     if (options.signal?.aborted) throw error
-    if (response.ok) throw error instanceof SyntaxError ? unexpectedResponse() : networkError()
+    throw error instanceof SyntaxError ? unexpectedResponse() : networkError()
   }
-  if (!response.ok) {
-    // 오류 계약의 코드를 사용해 화면에 표시할 문구를 선택한다.
-    const message = isErrorResponse(body) ? apiErrorMessage(body.error.code) : undefined
-    throw new ApiRequestError(message ?? `요청을 처리할 수 없습니다 (HTTP ${response.status}).`, 'http', response.status)
-  }
-  if (response.status !== expectedStatus || !isExpected(body)) throw unexpectedResponse()
+  if (!isExpected(body)) throw unexpectedResponse()
   return body
 }
 
@@ -216,6 +254,26 @@ export function getJob(jobId: string, signal: AbortSignal) {
 export function getResults(jobId: string, signal: AbortSignal) {
   return request(`/api/jobs/${encodeURIComponent(jobId)}/results`, { signal, cache: 'no-store' }, 200,
     (value): value is AnalysisResults => isResults(value, jobId))
+}
+
+export function getJobReport(jobId: string, signal: AbortSignal) {
+  return request(`/api/jobs/${encodeURIComponent(jobId)}/report`, { signal, cache: 'no-store' }, 200,
+    (value): value is JobReport => isJobReport(value, jobId))
+}
+
+const exportMimeTypes: Record<JobExportFormat, string> = {
+  csv: 'text/csv',
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+}
+
+export async function getJobExport(jobId: string, format: JobExportFormat) {
+  const response = await requestResponse(`/api/jobs/${encodeURIComponent(jobId)}/exports/${format}`, { cache: 'no-store' }, 200)
+  if (response.headers.get('content-type')?.split(';')[0].trim() !== exportMimeTypes[format]) throw unexpectedResponse()
+  try {
+    return await response.blob()
+  } catch {
+    throw networkError()
+  }
 }
 
 export function getReviews(jobId: string, signal: AbortSignal) {

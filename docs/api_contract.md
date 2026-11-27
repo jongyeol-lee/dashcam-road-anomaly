@@ -1,6 +1,6 @@
 # 로컬 분석 API 계약
 
-2026-11-26 · 로컬 단일 사용자 MVP · 기본 주소 `http://127.0.0.1:8000`. 현재 응답의 정확한 타입과 필수 필드는 `/openapi.json`에서 확인할 수 있습니다. React + Vite의 기본 origin은 `http://localhost:5173` 또는 `http://127.0.0.1:5173`입니다. 인증과 사용자별 격리는 없습니다. [Pydantic 모델](../src/road_anomaly/api/schemas.py)
+2026-11-27 · 로컬 단일 사용자 MVP · 기본 주소 `http://127.0.0.1:8000`. 현재 응답의 정확한 타입과 필수 필드는 `/openapi.json`에서 확인할 수 있습니다. React + Vite의 기본 origin은 `http://localhost:5173` 또는 `http://127.0.0.1:5173`입니다. 인증과 사용자별 격리는 없습니다. [Pydantic 모델](../src/road_anomaly/api/schemas.py)
 
 ## 엔드포인트
 
@@ -11,6 +11,9 @@
 | GET | `/api/jobs` | 200 JobHistory | 저장된 분석 이력과 검토 요약 |
 | GET | `/api/jobs/{job_id}` | 200 JobStatus | 상태와 시각·실패 정보 |
 | GET | `/api/jobs/{job_id}/results` | 200 AnalysisResults | 완료 결과 |
+| GET | `/api/jobs/{job_id}/report` | 200 JobReport | 완료 작업의 분석 및 저장된 검토 스냅샷 |
+| GET | `/api/jobs/{job_id}/exports/csv` | 200 text/csv | 완료 작업의 전체 장면 CSV |
+| GET | `/api/jobs/{job_id}/exports/xlsx` | 200 application/vnd.openxmlformats-officedocument.spreadsheetml.sheet | 완료 작업의 전체 장면 Excel |
 | GET | `/api/jobs/{job_id}/reviews` | 200 JobReviews | 완료 작업의 저장된 검토 결과 |
 | PUT | `/api/jobs/{job_id}/reviews/{event_id}` | 200 SceneReview | 완료 작업의 장면 한 건 저장 |
 | GET / HEAD | `/api/jobs/{job_id}/video` | 200 또는 206 | 업로드 사본 MP4 및 Range 응답 |
@@ -24,7 +27,7 @@
 
 선두 `ftyp` MP4 헤더(QuickTime `qt` 제외), 유효한 FPS·크기, 전체 디코딩과 보고된 프레임 수를 검사합니다. 디코더가 오류를 복구한 파일의 모든 손상을 판별하는 검사는 아닙니다. 검증은 202 전에 수행하며 YOLO는 응답과 독립된 워커에서 실행합니다. 같은 영상을 다시 올리면 별도 작업이 생깁니다.
 
-신규 작업의 `job.json`에는 `original_filename`과 `file_size_bytes`도 저장합니다. 표시용 파일명에는 경로의 마지막 구성 요소만 사용합니다. Windows 드라이브 접두사와 유니코드 제어·서식 문자 및 서로게이트를 제거하고 앞뒤 공백을 정리합니다. 한글과 이름 내부의 공백은 보존합니다. 255자를 넘으면 확장자를 포함해 255자로 줄입니다. 크기는 저장된 `input.mp4`의 바이트 수입니다. 파일 정보는 아래 이력 응답에서 제공합니다.
+신규 작업의 `job.json`에는 `original_filename`과 `file_size_bytes`도 저장합니다. 표시용 파일명에는 경로의 마지막 구성 요소만 사용합니다. Windows 드라이브 접두사와 유니코드 제어·서식 문자 및 서로게이트를 제거하고 앞뒤 공백을 정리합니다. 한글과 이름 내부의 공백은 보존합니다. 255자를 넘으면 확장자를 포함해 255자로 줄입니다. 크기는 저장된 `input.mp4`의 바이트 수입니다. 파일 정보는 이력과 리포트 응답에서 제공합니다.
 
 ```javascript
 const form = new FormData();
@@ -166,6 +169,39 @@ const job = await response.json();
 
 검토는 사용자 의견이며 AI 예측은 `/results`에 계속 보관됩니다. 검토 저장에는 GPU 분석이 필요하지 않습니다. 검토 조회 오류가 나도 기존 영상·분석 결과·대표 JPEG를 이용할 수 있습니다. [구현과 검증](experiments/part6_review_persistence.md)
 
+## 분석 리포트 내보내기
+
+리포트 조회와 두 내보내기 엔드포인트는 요청마다 `job.json`, `results.json`, `reviews.json`을 검토 저장과 같은 잠금 안에서 읽습니다. 완료 상태와 파일 간 작업·장면 식별자를 확인합니다. 성공 응답에 `Cache-Control: no-store`를 설정합니다. 검토 파일이 아직 없으면 저장된 검토가 없는 정상 상태로 처리합니다. 손상되거나 접근할 수 없는 파일은 세 엔드포인트 모두 오류를 반환합니다.
+
+| `JobReport` 필드 | 내용 |
+| --- | --- |
+| `job` | `JobStatus` 필드 및 서버에 저장된 `original_filename`, `file_size_bytes`. 기존 작업에 저장되지 않은 값은 `null` |
+| `results` | 기존 `AnalysisResults` 스키마. AI 원본 수치와 작업별 대표 JPEG URL 포함 |
+| `reviews` | 기존 `JobReviews` 스키마. 마지막으로 저장된 의견과 수정 시각 |
+| `review_summary` | `unreviewed`, `suspected`, `false_positive`, `deferred`, `reviewed_count`. 판단 보류는 검토 건수에 포함 |
+| `exported_at` | 스냅샷을 읽은 UTC 시각, ISO 8601 |
+
+CSV는 `text/csv; charset=utf-8`과 UTF-8 BOM, 쉼표 구분, CRLF 행 끝을 사용합니다. `Content-Disposition`은 `road-anomaly-<job_id>.csv` 첨부 파일명을 제공합니다. 전체 `results.events`를 저장 순서대로 한 장면당 한 행에 기록합니다. 결과 화면 필터나 정렬은 적용되지 않습니다. 정상 무탐지는 헤더만 반환합니다.
+
+| CSV 열 순서 | 의미 |
+| --- | --- |
+| `job_id`, `original_filename`, `created_at`, `finished_at`, `exported_at` | 작업 UUID, 저장된 이름, 작업 등록·분석 완료·CSV 스냅샷 시각 |
+| `event_id`, `class_id`, `class_name`, `class_label` | 작업 안에서의 장면 ID, AI 클래스 번호와 코드, 화면용 한글 클래스명 |
+| `start_time_sec`, `last_detection_time_sec`, `representative_time_sec`, `representative_frame_index` | 원본 영상 기준 각 시각(초)과 0부터 시작하는 대표 프레임 인덱스 |
+| `max_confidence`, `x1`, `y1`, `x2`, `y2` | 저장된 최대 모델 점수와 대표 박스의 영상 픽셀 좌표 |
+| `detection_count`, `detected_frame_count` | 해당 구간의 탐지 박스 수와 중복을 제외한 탐지 프레임 수 |
+| `review_state`, `review_label`, `review_updated_at` | 기존 검토 코드·한글 레이블·마지막 저장 시각. 저장 이력이 없으면 `unreviewed`와 빈 수정 시각 |
+| `model_sha256`, `profile` | 가중치 해시와 분석 프로필 |
+| `imgsz`, `conf`, `iou`, `interval_sec`, `max_gap_sec`, `max_event_duration_sec` | 입력 크기, 탐지 임계값, IoU, 샘플링 간격, 장면 병합 간격, 구간 길이 제한 |
+
+시각은 ISO 8601로 제공하며 과거 작업에 저장된 시간대 정보가 없으면 그대로 유지합니다. 미확인 파일명·시각·설정은 빈 필드입니다. 숫자 필드는 화면 표시용 반올림 없이 저장된 수치를 사용합니다. CSV 인용 규칙으로 쉼표와 따옴표를 보존하고, 수식으로 읽힐 수 있는 파일명 선두 문자(`=`, `+`, `-`, `@`, 전각 변형 등)는 작은따옴표를 앞에 덧붙입니다. 원래 파일명이 필요한 연동에서는 JSON 리포트의 `job.original_filename`을 사용합니다. 스프레드시트에서 다시 저장한 사본에는 해당 프로그램의 변환 규칙이 적용됩니다. [OWASP CSV Injection](https://community.owasp.org/attacks/CSV_Injection)
+
+XLSX의 `Content-Disposition`은 `road-anomaly-<job_id>.xlsx`입니다. CSV와 같은 순서로 31개 열을 제공하며, `분석 결과` 시트에 헤더 고정과 전체 행 필터를 적용합니다. 정상 무탐지는 서식이 있는 헤더 행을 반환합니다. 파일명 등 문자열은 Excel 텍스트 셀로 저장합니다. 미확인 값은 빈 셀입니다.
+
+`created_at`, `finished_at`, `exported_at`, `review_updated_at`은 KST(UTC+09:00)로 변환한 날짜 셀이며 `yyyy-mm-dd hh:mm:ss.000 KST`로 표시합니다. 시간대가 생략된 과거 작업은 서버의 저장 기준인 UTC로 해석합니다. 영상 시각, 점수, 프레임 번호, 좌표와 설정은 숫자 셀입니다. 표시 형식은 셀 값과 별개이며, Excel의 15자리 유효 숫자와 날짜 밀리초 제한보다 정밀한 분석에는 기존 CSV를 사용합니다. [openpyxl 날짜와 시간](https://openpyxl.readthedocs.io/en/stable/datetime.html) · [Excel 숫자 정밀도](https://support.microsoft.com/en-us/excel/excel-specifications-and-limits)
+
+React의 `/jobs/{job_id}/report`는 JSON 리포트와 기존 대표 JPEG를 조회합니다. 이미지를 모두 불러온 뒤 브라우저의 **PDF로 저장 / 인쇄**를 사용할 수 있습니다. 검토는 사용자 의견이며 Part 7 오류 분석의 후보를 찾는 데 쓸 수 있습니다. 학습용 정답 라벨로 사용하려면 별도의 검증이 필요합니다. [리포트 구현과 검증](experiments/part6_report_export.md)
+
 ## 영상과 이미지 사용
 
 상대 URL은 API의 origin에 결합합니다. `new URL(result.video_url, apiBase)`를 video src로, `new URL(event.image_url, apiBase)`를 img src로 사용합니다. 비디오의 `loadedmetadata` 이후 `video.currentTime = event.representative_time_sec`로 이동할 수 있습니다. 실제 브라우저 코덱 재생과 타임스탬프 이동은 Part 6.2~6.3 검증 대상입니다. 가변 FPS 영상의 추정 시각 오차도 남습니다.
@@ -197,12 +233,13 @@ Content-Length: 1024
 | --- | --- | --- |
 | 400 | `invalid_request` | multipart 오류, 추가 필드·파일, 잘못된 Range |
 | 404 | `not_found` | 없는 작업·구간·파일, 허용되지 않는 경로 |
-| 409 | `results_not_ready` | queued/running/failed 작업의 결과·이미지·검토 조회 또는 검토 저장 |
+| 409 | `results_not_ready` | queued/running/failed 작업의 결과·이미지·검토 조회, 검토 저장 또는 리포트 내보내기 |
 | 413 | `upload_too_large` | 파일 또는 전체 요청 크기 초과 |
 | 415 | `unsupported_file_type` | MP4 확장자 아님 |
 | 422 | `invalid_request` / `empty_file` / `invalid_video` | 잘못된 UUID·event_id·검토 요청·목록 조건, 필수 파일 누락, 빈 파일, 디코딩 실패 |
 | 416 | `invalid_range` | 영상 파일 범위 밖 Range |
 | 500 | `internal_error` | 저장·조회 중 서버 오류. 상세는 로컬 로그 |
+| 500 | `job_data_unavailable` / `results_unavailable` | 리포트용 작업 메타데이터나 분석 결과가 손상됐거나 읽을 수 없음 |
 | 500 | `review_data_invalid` | 검토 JSON이 깨졌거나 작업·장면·스키마가 일치하지 않음 |
 | 500 | `review_read_failed` | 검토 파일 읽기 실패 |
 | 500 | `review_save_failed` | 검토 파일 쓰기 또는 교체 실패 |

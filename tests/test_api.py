@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Barrier, Event, Lock, Thread
 from time import monotonic, sleep
@@ -15,11 +15,13 @@ from uuid import UUID, uuid4
 import cv2
 import numpy as np
 from fastapi.testclient import TestClient
+from openpyxl import load_workbook
 from starlette.datastructures import UploadFile
 
 from scripts.make_test_video import make_test_video
 from src.road_anomaly.api.jobs import ApiSettings, JobManager, write_json_atomic
 from src.road_anomaly.api.main import create_app
+from src.road_anomaly.api.reports import CSV_COLUMNS, spreadsheet_text
 from src.road_anomaly.api.schemas import JobStatus, normalize_upload_filename
 from src.road_anomaly.video_analysis import DETECTION_COLUMNS, MVP_SHA256, PROFILES
 
@@ -105,6 +107,245 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(response.json()["error"]["code"], code)
         self.assertNotIn(str(self.root), response.text)
         self.assertEqual(set(response.json()), {"error"})
+
+    def export_rows(self, client, job_id):
+        response = client.get(f"/api/jobs/{job_id}/exports/csv")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.headers["content-type"], "text/csv; charset=utf-8")
+        self.assertEqual(response.headers["content-disposition"], f'attachment; filename="road-anomaly-{job_id}.csv"')
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        self.assertTrue(response.content.startswith(b"\xef\xbb\xbf"))
+        reader = csv.DictReader(io.StringIO(response.content.decode("utf-8-sig"), newline=""))
+        self.assertEqual(tuple(reader.fieldnames), CSV_COLUMNS)
+        return list(reader)
+
+    def export_sheet(self, client, job_id):
+        response = client.get(f"/api/jobs/{job_id}/exports/xlsx")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.headers["content-type"], "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        self.assertEqual(response.headers["content-disposition"], f'attachment; filename="road-anomaly-{job_id}.xlsx"')
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        workbook = load_workbook(io.BytesIO(response.content))
+        self.addCleanup(workbook.close)
+        return workbook.active
+
+    def test_xlsx_preserves_all_scenes_and_saved_reviews_in_readable_cell_types(self):
+        self.multiple_events = True
+        with self.client() as client:
+            job_id = self.upload(client, filename="한글 전방.mp4")
+            self.wait(client, job_id)
+            client.put(f"/api/jobs/{job_id}/reviews/event_0001", json={"review": "deferred"})
+            directory = self.settings.jobs_root / job_id
+            path = directory / "results.json"
+            results = json.loads(path.read_bytes())
+            results["events"][0].update(max_confidence=0.7012345678912, representative_time_sec=1.012345678912,
+                                        representative_xyxy=[-0.012345678912, 20.567891234, 51.2, 66.7])
+            write_json_atomic(path, results)
+            kept = {file: file.read_bytes() for file in directory.glob("*.json")}
+
+            csv_rows = self.export_rows(client, job_id)
+            sheet = self.export_sheet(client, job_id)
+            self.assertEqual(tuple(cell.value for cell in sheet[1]), CSV_COLUMNS)
+            self.assertEqual((sheet.max_row, sheet.max_column), (3, 31))
+            self.assertEqual(sheet.freeze_panes, "A2")
+            self.assertEqual(sheet.auto_filter.ref, "A1:AE3")
+            self.assertTrue(sheet["A1"].alignment.wrap_text)
+            self.assertEqual(sheet["A1"].fill.fgColor.rgb, "00244C70")
+            self.assertGreater(sheet.column_dimensions["C"].width, sheet.column_dimensions["A"].width)
+            self.assertGreater(sheet.column_dimensions["I"].width, sheet.column_dimensions["H"].width)
+            self.assertLess(sheet.column_dimensions["X"].width, 32)
+            self.assertEqual(sheet["V2"].value, "판단 보류")
+            self.assertEqual(sheet["V3"].value, "미검토")
+            self.assertIsNone(sheet["W3"].value)
+            for cells, csv_row in zip(sheet.iter_rows(min_row=2), csv_rows, strict=True):
+                for field, cell in zip(CSV_COLUMNS, cells, strict=True):
+                    raw = csv_row[field]
+                    if field in {"created_at", "finished_at", "exported_at", "review_updated_at"} and raw:
+                        self.assertIsInstance(cell.value, datetime)
+                        self.assertIn("KST", cell.number_format)
+                        expected = datetime.fromisoformat(raw).replace(tzinfo=None) + timedelta(hours=9)
+                        tolerance = 5 if field == "exported_at" else 0.001
+                        self.assertLess(abs((cell.value - expected).total_seconds()), tolerance)
+                    elif type(cell.value) in {int, float}:
+                        self.assertEqual(cell.data_type, "n")
+                        self.assertAlmostEqual(cell.value, float(raw), places=12)
+                    else:
+                        self.assertEqual(cell.value, raw or None)
+            self.assertEqual({file: file.read_bytes() for file in kept}, kept)
+            self.assertEqual(len(self.calls), 1)
+
+    def test_xlsx_serializes_long_untrusted_filenames_as_text(self):
+        with self.client() as client:
+            job_id = self.upload(client, filename='=1+2,' + '전방영상' * 48 + '.mp4')
+            self.wait(client, job_id)
+            saved_name = client.get(f"/api/jobs/{job_id}/report").json()["job"]["original_filename"]
+            sheet = self.export_sheet(client, job_id)
+            self.assertEqual((sheet["B2"].data_type, sheet["B2"].value), ("s", saved_name))
+            self.assertLess(sheet.column_dimensions["B"].width, len(saved_name))
+            self.assertEqual(self.export_rows(client, job_id)[0]["original_filename"], "'" + saved_name)
+
+    def test_xlsx_keeps_styled_headers_for_zero_events_and_supports_legacy_metadata(self):
+        with self.client() as client:
+            job_id = self.upload(client)
+            self.wait(client, job_id)
+            path = self.settings.jobs_root / job_id / "job.json"
+            job = json.loads(path.read_bytes())
+            del job["original_filename"], job["file_size_bytes"]
+            write_json_atomic(path, dict(job, created_at="2026-11-27T03:46:14.123", finished_at=None))
+            sheet = self.export_sheet(client, job_id)
+            self.assertIsNone(sheet["B2"].value)
+            self.assertEqual(sheet["C2"].value, datetime(2026, 11, 27, 12, 46, 14, 123000))
+            self.assertIsNone(sheet["D2"].value)
+
+            self.empty = True
+            empty_id = self.upload(client)
+            self.wait(client, empty_id)
+            empty = self.export_sheet(client, empty_id)
+            self.assertEqual(tuple(cell.value for cell in empty[1]), CSV_COLUMNS)
+            self.assertEqual((empty.max_row, empty.freeze_panes, empty.auto_filter.ref), (1, "A2", "A1:AE1"))
+            self.assertIn("KST", empty["C1"].comment.text)
+
+    def test_job_report_and_csv_use_the_same_data_without_mutating_files(self):
+        self.multiple_events = True
+        weights = self.root / "model.pt"
+        weights.write_bytes(b"model-weight-sentinel")
+        with self.client() as client:
+            job_id = self.upload(client, filename="한글,전방.mp4")
+            status = self.wait(client, job_id)
+            result_path = self.settings.jobs_root / job_id / "results.json"
+            results = json.loads(result_path.read_text(encoding="utf-8"))
+            results["events"][0].update(max_confidence=0.700012345, representative_time_sec=1.023456789,
+                                        representative_xyxy=[-0.0001234, 20.56789, 50.123456, 60.789012])
+            write_json_atomic(result_path, results)
+            kept = {path: path.read_bytes() for path in self.root.rglob("*") if path.suffix in {".json", ".mp4", ".jpg", ".pt"}}
+
+            response = client.get(f"/api/jobs/{job_id}/report")
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.headers["cache-control"], "no-store")
+            report = response.json()
+            self.assertEqual(report["results"], results)
+            self.assertEqual(report["job"], dict(status, original_filename="한글,전방.mp4", file_size_bytes=len(self.mp4)))
+            self.assertEqual(report["reviews"], {"job_id": job_id, "reviews": []})
+            self.assertEqual(report["review_summary"], dict(unreviewed=2, suspected=0, false_positive=0, deferred=0, reviewed_count=0))
+            rows = self.export_rows(client, job_id)
+            self.assertEqual(len(rows), results["event_count"])
+            for row, event in zip(rows, results["events"], strict=True):
+                self.assertEqual(row["event_id"], event["event_id"])
+                self.assertEqual(row["original_filename"], "한글,전방.mp4")
+                self.assertEqual(row["class_label"], "거북등 균열")
+                self.assertEqual(row["review_label"], "미검토")
+                self.assertEqual(row["review_updated_at"], "")
+                self.assertEqual(row["model_sha256"], results["model_sha256"])
+                for field in ("max_confidence", "start_time_sec", "last_detection_time_sec", "representative_time_sec"):
+                    self.assertEqual(float(row[field]), event[field])
+                self.assertEqual([float(row[key]) for key in ("x1", "y1", "x2", "y2")], event["representative_xyxy"])
+                self.assertEqual(int(row["representative_frame_index"]), event["representative_frame_index"])
+                self.assertEqual(datetime.fromisoformat(row["exported_at"]).tzinfo, UTC)
+                for key in ("imgsz", "conf", "iou", "interval_sec", "max_gap_sec", "max_event_duration_sec"):
+                    self.assertEqual(float(row[key]), results["settings"][key])
+            self.assertEqual({path: path.read_bytes() for path in kept}, kept)
+            self.assertFalse((result_path.parent / "reviews.json").exists())
+            self.assertEqual(len(self.calls), 1)
+
+    def test_report_reflects_each_saved_state_and_isolates_jobs(self):
+        self.multiple_events = True
+        with self.client() as client:
+            job_id = self.upload(client)
+            other_id = self.upload(client)
+            self.wait(client, job_id)
+            self.wait(client, other_id)
+            for state, label in (("suspected", "파손 의심"), ("false_positive", "오탐"),
+                                 ("deferred", "판단 보류"), ("unreviewed", "미검토")):
+                saved = client.put(f"/api/jobs/{job_id}/reviews/event_0001", json={"review": state}).json()
+                report = client.get(f"/api/jobs/{job_id}/report").json()
+                self.assertEqual(report["reviews"]["reviews"], [saved])
+                self.assertEqual(report["review_summary"]["reviewed_count"], int(state != "unreviewed"))
+                row, untouched = self.export_rows(client, job_id)
+                self.assertEqual((row["review_state"], row["review_label"]), (state, label))
+                self.assertEqual(datetime.fromisoformat(row["review_updated_at"]), datetime.fromisoformat(saved["updated_at"]))
+                self.assertEqual(untouched["review_state"], "unreviewed")
+            other_report = client.get(f"/api/jobs/{other_id}/report").json()
+            self.assertEqual(other_report["reviews"]["reviews"], [])
+            self.assertEqual(other_report["review_summary"]["unreviewed"], 2)
+            self.assertTrue(all(row["job_id"] == other_id and row["review_updated_at"] == "" for row in self.export_rows(client, other_id)))
+
+    def test_report_supports_zero_events_and_legacy_filename(self):
+        with self.client() as client:
+            job_id = self.upload(client)
+            self.wait(client, job_id)
+            path = self.settings.jobs_root / job_id / "job.json"
+            job = json.loads(path.read_text(encoding="utf-8"))
+            del job["original_filename"], job["file_size_bytes"]
+            write_json_atomic(path, job)
+            report = client.get(f"/api/jobs/{job_id}/report").json()
+            self.assertIsNone(report["job"]["original_filename"])
+            self.assertIsNone(report["job"]["file_size_bytes"])
+            self.assertEqual(self.export_rows(client, job_id)[0]["original_filename"], "")
+            self.empty = True
+            empty_id = self.upload(client)
+            self.wait(client, empty_id)
+            empty = client.get(f"/api/jobs/{empty_id}/report").json()
+            self.assertEqual(empty["results"]["events"], [])
+            self.assertTrue(all(count == 0 for count in empty["review_summary"].values()))
+            self.assertEqual(self.export_rows(client, empty_id), [])
+
+    def test_csv_preserves_special_characters_and_escapes_formula_prefixes(self):
+        with self.client() as client:
+            job_id = self.upload(client)
+            self.wait(client, job_id)
+            path = self.settings.jobs_root / job_id / "job.json"
+            job = json.loads(path.read_text(encoding="utf-8"))
+            for name in ('한글,"전방".mp4', '=1+1,한글".mp4', '+한글.mp4', '-한글.mp4', '@한글.mp4', '＝한글.mp4'):
+                with self.subTest(name=name):
+                    write_json_atomic(path, dict(job, original_filename=name))
+                    report = client.get(f"/api/jobs/{job_id}/report").json()
+                    self.assertEqual(report["job"]["original_filename"], name)
+                    row, = self.export_rows(client, job_id)
+                    self.assertEqual(row["original_filename"], name if name.startswith("한글") else "'" + name)
+                    self.assertIsNone(row.get(None))
+            # 업로드 계약에서 제어문자를 제거하고, CSV 문자열 처리도 선두 제어문자를 방어한다.
+            self.assertEqual(normalize_upload_filename("한글\r\n전방.mp4"), "한글전방.mp4")
+            for prefix in ("\r", "\n", "\t", " \t="):
+                self.assertEqual(spreadsheet_text(prefix + "한글.mp4"), "'" + prefix + "한글.mp4")
+
+    def test_report_rejects_unknown_unfinished_and_inconsistent_jobs(self):
+        with self.client() as client:
+            job_id = self.upload(client)
+            self.wait(client, job_id)
+            path = self.settings.jobs_root / job_id / "job.json"
+            job = json.loads(path.read_text(encoding="utf-8"))
+            for suffix in ("report", "exports/csv", "exports/xlsx"):
+                self.assert_error(client.get(f"/api/jobs/not-uuid/{suffix}"), 422, "invalid_request")
+                self.assert_error(client.get(f"/api/jobs/{uuid4()}/{suffix}"), 404, "not_found")
+                for state in ("queued", "running", "failed"):
+                    write_json_atomic(path, dict(job, status=state))
+                    self.assert_error(client.get(f"/api/jobs/{job_id}/{suffix}"), 409, "results_not_ready")
+                write_json_atomic(path, dict(job, job_id=str(uuid4())))
+                self.assert_error(client.get(f"/api/jobs/{job_id}/{suffix}"), 500, "job_data_unavailable")
+
+    def test_report_errors_when_results_or_reviews_cannot_be_read(self):
+        with self.client() as client:
+            job_id = self.upload(client)
+            self.wait(client, job_id)
+            directory = self.settings.jobs_root / job_id
+            path = directory / "results.json"
+            original = path.read_bytes()
+            results = json.loads(original)
+            results["events"][0]["image_url"] = f"/api/jobs/{uuid4()}/scenes/event_0001"
+            for suffix in ("report", "exports/csv", "exports/xlsx"):
+                endpoint = f"/api/jobs/{job_id}/{suffix}"
+                path.write_text("{", encoding="utf-8")
+                self.assert_error(client.get(endpoint), 500, "results_unavailable")
+                write_json_atomic(path, results)
+                self.assert_error(client.get(endpoint), 500, "results_unavailable")
+                path.write_bytes(original)
+                invalid_review = directory / "reviews.json"
+                invalid_review.write_text("{", encoding="utf-8")
+                self.assert_error(client.get(endpoint), 500, "review_data_invalid")
+                self.assertEqual(invalid_review.read_bytes(), b"{")
+                invalid_review.unlink()
+                with patch.object(Path, "read_bytes", side_effect=PermissionError("unreadable review")):
+                    self.assert_error(client.get(endpoint), 500, "review_read_failed")
 
     def test_history_empty(self):
         with self.client() as client:

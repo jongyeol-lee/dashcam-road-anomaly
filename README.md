@@ -179,4 +179,6 @@ curl.exe --silent --range 0-1023 --dump-header - --output NUL "$api/api/jobs/$jo
 
 메인 화면의 **최근 분석 이력**에는 최신 작업 5건까지 표시됩니다. **분석 이력**(`/history`)에서는 파일명과 상태로 작업을 찾고, 결과 또는 분석 상태를 다시 열 수 있습니다. 목록에 돌아오면 URL에 저장된 조회 조건을 복원하고 최신 검토 집계를 불러옵니다. [이력 화면 구현과 검증](docs/experiments/part6_job_history_ui.md)
 
+완료 작업의 결과 화면에서 전체 장면을 CSV·Excel로 다운로드하거나 PDF 리포트를 열 수 있습니다. CSV는 원본 수치와 UTC 시각을 분석할 때 사용합니다. Excel은 헤더 고정, 자동 필터, 주요 열 너비와 KST 시각을 적용한 검토용 표입니다. 세 형식 모두 화면 필터와 관계없이 전체 장면의 분석과 저장된 검토를 포함합니다. **PDF로 저장 / 인쇄**를 누르면 브라우저 인쇄 창이 열립니다. 사용자 검토를 학습 정답으로 쓰려면 별도 검증이 필요합니다. [리포트 API와 열 정의](docs/api_contract.md#분석-리포트-내보내기) · [실제 출력 검증](docs/experiments/part6_report_export.md)
+
 CORS는 `http://localhost:5173`, `http://127.0.0.1:5173`만 허용합니다. 인증이 없는 로컬 단일 사용자 MVP이며 외부 인터넷에 공개하지 않습니다. 임시 Ultralytics·Matplotlib 설정과 오프라인·자동 설치 금지를 유지합니다. [React 실행과 테스트](frontend/README.md)

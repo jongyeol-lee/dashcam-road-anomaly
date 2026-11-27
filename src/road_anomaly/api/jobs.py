@@ -1,6 +1,7 @@
 import csv
 import json
 import logging
+import math
 import os
 from collections import Counter
 from collections.abc import Callable
@@ -22,7 +23,7 @@ from ..video import open_video_capture
 from ..video_analysis import MVP_SHA256, PROJECT_ROOT, analyze_video
 from .schemas import (
     AnalysisResults, ApiError, JobAnalysisSummary, JobHistory, JobHistoryItem, JobHistoryQuery, JobHistoryWarning,
-    JobReviews, ReviewState, ReviewSummary, Scene, SceneReview, StoredJob, VideoInfo,
+    JobReport, JobReviews, REPORT_SETTING_FIELDS, ReviewState, ReviewSummary, Scene, SceneReview, StoredJob, VideoInfo,
 )
 
 
@@ -97,6 +98,13 @@ def write_json_atomic(path: Path, data: dict) -> None:
 def history_warning(job_id: UUID, code: str, message: str) -> JobHistoryWarning:
     logger.warning("분석 이력 조회 경고 (%s): %s", code, job_id)
     return JobHistoryWarning(job_id=job_id, error=ApiError(code=code, message=message))
+
+
+def summarize_reviews(reviews: JobReviews, event_count: int) -> ReviewSummary:
+    counts = Counter(entry.review for entry in reviews.reviews)
+    reviewed = counts["suspected"] + counts["false_positive"] + counts["deferred"]
+    return ReviewSummary(unreviewed=event_count - reviewed, suspected=counts["suspected"],
+                         false_positive=counts["false_positive"], deferred=counts["deferred"], reviewed_count=reviewed)
 
 
 def validate_upload(path: Path) -> None:
@@ -279,11 +287,7 @@ class JobManager:
         except (OSError, ValueError):
             warnings.append(history_warning(job_id, "review_read_failed", "검토 데이터를 읽을 수 없습니다."))
             return item
-        counts = Counter(entry.review for entry in reviews.reviews)
-        reviewed = counts["suspected"] + counts["false_positive"] + counts["deferred"]
-        item.reviews = ReviewSummary(unreviewed=len(event_ids) - reviewed, suspected=counts["suspected"],
-                                     false_positive=counts["false_positive"], deferred=counts["deferred"],
-                                     reviewed_count=reviewed)
+        item.reviews = summarize_reviews(reviews, len(event_ids))
         return item
 
     def _update(self, job_id: UUID, **changes) -> None:
@@ -347,6 +351,43 @@ class JobManager:
         if self.get(job_id).status != "completed":
             raise JobError(409, "results_not_ready", "완료된 작업의 결과만 조회할 수 있습니다.")
         return self._read_results(job_id)
+
+    def report(self, job_id: UUID) -> JobReport:
+        # 검토 저장과 같은 잠금에서 작업·분석·검토 파일의 한 시점 상태를 읽는다.
+        with self._lock:
+            try:
+                job = self.get(job_id)
+                if job.job_id != job_id:
+                    raise ValueError("Inconsistent stored job ID")
+            except (OSError, ValueError) as error:
+                raise JobError(500, "job_data_unavailable", "저장된 작업 정보를 확인할 수 없습니다.") from error
+            if job.status != "completed":
+                raise JobError(409, "results_not_ready", "완료된 작업의 리포트만 조회할 수 있습니다.")
+            try:
+                results = self._read_results(job_id)
+                event_ids = {scene.event_id for scene in results.events}
+                if (results.job_id != job_id or results.event_count != len(results.events)
+                        or len(event_ids) != results.event_count
+                        or results.detection_count != sum(scene.detection_count for scene in results.events)
+                        or results.video_url != f"/api/jobs/{job_id}/video"
+                        or any(scene.class_name != CLASSES[scene.class_id]
+                               or scene.image_url != f"/api/jobs/{job_id}/scenes/{scene.event_id}"
+                               for scene in results.events)):
+                    raise ValueError("Inconsistent stored results")
+                for key in REPORT_SETTING_FIELDS:
+                    value = results.settings.get(key)
+                    if value is not None and not (type(value) is int or type(value) is float and math.isfinite(value)):
+                        raise ValueError("Invalid stored report setting")
+            except (JobError, OSError, ValueError) as error:
+                raise JobError(500, "results_unavailable", "저장된 분석 결과를 확인할 수 없습니다.") from error
+            try:
+                path = self._reviews_path(job_id)
+            except JobError as error:
+                raise JobError(500, "review_data_invalid", "저장된 검토 데이터를 확인할 수 없습니다.") from error
+            reviews = self._read_reviews(path, job_id, event_ids)
+            return JobReport(job=job, results=results, reviews=reviews,
+                             review_summary=summarize_reviews(reviews, results.event_count),
+                             exported_at=datetime.now(UTC))
 
     def scene_path(self, job_id: UUID, event_id: str) -> Path:
         results = self.results(job_id)

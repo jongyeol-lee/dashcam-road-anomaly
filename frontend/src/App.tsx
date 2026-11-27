@@ -4,6 +4,7 @@ import { Layout, EmptyState } from './components/ui'
 import { SessionProvider } from './mocks/SessionProvider'
 import { UploadPage } from './pages/UploadPage'
 import { HistoryPage } from './pages/HistoryPage'
+import { ReportPage } from './pages/ReportPage'
 import { AnalysisPage, ExampleAnalysisPage } from './pages/AnalysisPage'
 import { ExampleResultsPage, ResultsPage } from './pages/ResultsPage'
 
@@ -21,6 +22,7 @@ export default function App() {
     <Route path="/history" element={<HistoryPage />} />
     <Route path="/jobs/:jobId" element={<AnalysisPage />} />
     <Route path="/jobs/:jobId/results" element={<ResultsPage />} />
+    <Route path="/jobs/:jobId/report" element={<ReportPage />} />
     <Route path="/examples" element={<SessionProvider><Outlet /></SessionProvider>}>
       <Route path="jobs/:jobId" element={<ExampleAnalysisPage />} />
       <Route path="jobs/:jobId/results" element={<ExampleResultsPage />} />

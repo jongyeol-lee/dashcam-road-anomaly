@@ -17,8 +17,8 @@ from starlette.exceptions import HTTPException
 from .jobs import ApiSettings, JobError, JobManager, contained_path, validate_upload
 from .reports import XLSX_MIME, report_csv, report_xlsx
 from .schemas import (
-    AnalysisResults, ErrorResponse, EVENT_ID_PATTERN, JobHistory, JobHistoryQuery, JobReport, JobReviews, JobStatus,
-    ReviewUpdate, SceneReview, normalize_upload_filename,
+    ErrorResponse, EVENT_ID_PATTERN, JobDetail, JobHistory, JobHistoryQuery, JobReport, JobReviews, JobStatus,
+    ResultDetail, ReviewUpdate, SceneReview, normalize_upload_filename,
 )
 
 
@@ -159,11 +159,11 @@ def create_app(settings: ApiSettings | None = None, *, analyzer=None) -> FastAPI
         """저장된 분석 작업과 페이지에 포함된 작업의 검토 요약을 조회한다."""
         return manager.list_history(query)
 
-    @app.get("/api/jobs/{job_id}", response_model=JobStatus)
+    @app.get("/api/jobs/{job_id}", response_model=JobDetail)
     def job_status(job_id: UUID):
         return manager.get(job_id)
 
-    @app.get("/api/jobs/{job_id}/results", response_model=AnalysisResults)
+    @app.get("/api/jobs/{job_id}/results", response_model=ResultDetail)
     def results(job_id: UUID):
         return manager.results(job_id)
 

@@ -30,7 +30,7 @@ export function ResultsPage() {
 
 function LiveResults({ jobId, filename }: { jobId: string; filename?: string }) {
   const { data: result, error, retry } = useJobQuery(jobId, getResults)
-  if (result) return <LiveReviewWorkspace result={result} filename={filename} />
+  if (result) return <LiveReviewWorkspace result={result} filename={result.original_filename ?? filename} />
   if (error instanceof ApiRequestError && error.status === 404) {
     return <JobNotice title="작업을 찾을 수 없습니다"><p>{error.message}</p></JobNotice>
   }

@@ -1,6 +1,6 @@
 # 개발환경 버전 관리
 
-최신 추가: [Part 6.1 웹 의존성](#part-61-웹-의존성-추가) · 2026-11-25. 아래 11월 19일의 AI 환경 구축 기록은 당시 결과로 유지합니다.
+Part 6.5에서 기존 환경을 재검증했습니다. Python 3.14.5, torch 2.14.1+cu130, torchvision 0.29.1+cu130, Ultralytics 8.4.215, OpenCV 5.0.0.93, FastAPI 0.165.0, Uvicorn 0.54.0, openpyxl 3.1.5 조합으로 실제 후방 MP4를 디코딩하고 RTX 3060 Ti에서 FP32 입력 72장을 처리했습니다. 드라이버는 581.15, PyTorch 빌드는 CUDA 13.0입니다. [최종 실측과 검증 조건](experiments/part6_final_service_validation.md)
 
 확인일 **2026-11-19 (KST)** · 개발환경 구축 및 재구성 검증
 

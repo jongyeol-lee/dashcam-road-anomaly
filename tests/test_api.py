@@ -353,6 +353,20 @@ class ApiTest(unittest.TestCase):
                 "items": [], "total": 0, "count": 0, "limit": 20, "offset": 0, "warnings": [],
             })
 
+    def test_detail_filename_is_sanitized_and_legacy_jobs_remain_readable(self):
+        with self.client() as client:
+            job_id = self.upload(client, filename="folder/후방 기록.mp4")
+            self.assertEqual(self.wait(client, job_id)["original_filename"], "후방 기록.mp4")
+            self.assertEqual(client.get(f"/api/jobs/{job_id}/results").json()["original_filename"], "후방 기록.mp4")
+            path = self.settings.jobs_root / job_id / "job.json"
+            stored = json.loads(path.read_bytes())
+            del stored["original_filename"]
+            write_json_atomic(path, stored)
+            self.assertIsNone(client.get(f"/api/jobs/{job_id}").json()["original_filename"])
+            self.assertEqual(client.get(f"/api/jobs/{job_id}/results").status_code, 200)
+            self.assertIsNone(client.get(f"/api/jobs/{job_id}/results").json()["original_filename"])
+            self.assertNotIn("original_filename", json.loads(path.read_bytes()))
+
     def test_history_invalid_queries(self):
         with self.client() as client:
             for params in ({"limit": 0}, {"limit": 101}, {"offset": -1}, {"offset": "x"},
@@ -369,7 +383,7 @@ class ApiTest(unittest.TestCase):
             self.assertEqual(upload.status_code, 202, upload.text)
             self.assertEqual(set(upload.json()), set(JobStatus.model_fields))
             job_id = upload.json()["job_id"]
-            self.assertEqual(set(self.wait(client, job_id)), set(JobStatus.model_fields))
+            self.assertEqual(set(self.wait(client, job_id)), set(JobStatus.model_fields) | {"original_filename"})
             path = self.settings.jobs_root / job_id / "job.json"
             disk = json.loads(path.read_bytes())
             row = client.get("/api/jobs", params={"search": "전방 영상"}).json()["items"][0]

@@ -9,8 +9,8 @@
 | GET | `/api/health` | 200 JSON | API 응답 가능 여부. CUDA·가중치 준비 보장은 아님 |
 | POST | `/api/jobs` | 202 JobStatus | MP4 검증·저장 후 작업 생성 |
 | GET | `/api/jobs` | 200 JobHistory | 저장된 분석 이력과 검토 요약 |
-| GET | `/api/jobs/{job_id}` | 200 JobStatus | 상태와 시각·실패 정보 |
-| GET | `/api/jobs/{job_id}/results` | 200 AnalysisResults | 완료 결과 |
+| GET | `/api/jobs/{job_id}` | 200 JobDetail | 상태와 시각·실패 정보, 표시용 파일명 |
+| GET | `/api/jobs/{job_id}/results` | 200 ResultDetail | 완료 결과와 표시용 파일명 |
 | GET | `/api/jobs/{job_id}/report` | 200 JobReport | 완료 작업의 분석 및 저장된 검토 스냅샷 |
 | GET | `/api/jobs/{job_id}/exports/csv` | 200 text/csv | 완료 작업의 전체 장면 CSV |
 | GET | `/api/jobs/{job_id}/exports/xlsx` | 200 application/vnd.openxmlformats-officedocument.spreadsheetml.sheet | 완료 작업의 전체 장면 Excel |
@@ -52,7 +52,7 @@ const job = await response.json();
 }
 ```
 
-위 시각은 형식 설명용입니다. 모든 시각은 UTC ISO 8601이며 프론트엔드에서 필요에 따라 KST로 표시합니다. 상태 조회도 같은 구조를 반환합니다.
+위 시각은 형식 설명용입니다. 모든 시각은 UTC ISO 8601이며 프론트엔드에서 필요에 따라 KST로 표시합니다. 개별 상태 GET은 위 필드에 `original_filename`(표시용 문자열 또는 null)을 추가합니다. 완료 결과 GET도 같은 이름을 제공합니다. 두 응답은 이미 읽은 작업 메타데이터를 사용하며, 과거에 파일명을 저장하지 않은 작업은 null입니다. 업로드 POST의 202 응답은 위 예시와 같습니다.
 
 | 필드 | 타입·의미 |
 | --- | --- |
@@ -105,6 +105,7 @@ const job = await response.json();
 | 필드 | 타입·의미 |
 | --- | --- |
 | `job_id`, `status` | UUID, `completed` |
+| `original_filename` | 개별 결과 GET의 표시용 파일명. 정보가 없으면 null. 리포트에서는 `job.original_filename`을 사용합니다. |
 | `video` | `{fps, width, height, frame_count, duration_sec}`. duration은 보고 프레임 수/FPS이며 알 수 없으면 null |
 | `video_url` | 이 작업의 MP4 API 상대 URL |
 | `extracted_frame_count` / `inferred_frame_count` | 추출·추론한 프레임 수 |

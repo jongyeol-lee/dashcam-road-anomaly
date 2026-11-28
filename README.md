@@ -37,6 +37,8 @@ MP4 입력 → 프레임 추출 → YOLO 추론 → 클래스별 시간 기준 �
 
 ## 현재 구현 상태
 
+상태·결과 주소를 새 탭에 붙여 넣으면 서버에 저장된 원본 파일명을 확인할 수 있습니다. Part 6.5에서는 실제 후방 MP4의 CUDA 분석부터 검토 저장과 CSV·Excel·PDF 출력까지 검증했습니다. [최종 웹 서비스 검증 및 Part 7 인수인계](docs/experiments/part6_final_service_validation.md)
+
 Windows x64의 프로젝트 가상환경에서 CUDA와 torchvision NMS를 검증하고, RDD2022 Czech 데이터 변환과 YOLO11n Baseline 학습·Validation 평가를 완료했습니다. MP4 분석 CLI와 Python 함수는 Czech Baseline과 Czech + Japan 혼합 모델을 지원합니다. 혼합 모델의 MVP 프로필로 실제 전·후방 영상 두 편에서 0.5초마다 추출한 141장 모두를 추론하고 대표 장면 22개를 원본 프레임과 대조했습니다. 웹에서는 React로 MP4를 업로드하고 FastAPI 분석 상태, 원본 영상, 대표 장면을 확인할 수 있습니다. Part 6.3-2B-2부터 장면을 검토하면 서버에 저장되며 같은 작업에 다시 접속할 때 복원됩니다. [실제 MP4 검증](docs/experiments/part5_mvp_video_pipeline.md) · [웹 통합 검증](docs/experiments/part6_service_integration_validation.md) · [검토 저장 검증](docs/experiments/part6_review_persistence.md)
 
 | 경로 | 용도 |

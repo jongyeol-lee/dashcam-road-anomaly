@@ -32,6 +32,8 @@ Playwright는 설치된 Microsoft Edge에서 프론트엔드 빌드를 사용한
 
 리포트 화면(`/jobs/<job_id>/report`)에서 **최신 리포트 다시 불러오기**를 선택하면 검토를 다시 조회한다. 대표 JPEG를 모두 확인한 뒤 **PDF로 저장 / 인쇄**를 누르고, 브라우저 인쇄 창에서 **PDF로 저장**을 선택한다. 추가 설정에서 **머리글과 바닥글**을 해제하면 브라우저의 출력 날짜와 로컬 URL을 숨길 수 있다. 미리보기에 Liner 같은 브라우저 확장 버튼이 나타나면 해당 사이트에서 확장을 끄거나 확장이 없는 프로필에서 리포트를 다시 열어 출력한다. 대표 이미지에 차량번호, 얼굴, 위치정보가 포함될 수 있으므로 외부 공유 전 사용 권한과 비식별화 필요성을 확인한다. [출력 검증](../docs/experiments/part6_report_export.md)
 
+상태·결과 URL을 새 탭에서 열면 개별 API 응답의 파일명을 표시한다. 저장된 이름이 없는 작업은 `원본 영상`으로 표시한다. 기본 서버에 업데이트를 적용할 때는 백엔드도 정상 종료 후 다시 실행한다. OpenAPI에서 상태 GET과 결과 GET의 200 응답 모델에 각각 `original_filename`이 있는지 확인할 수 있다. [상세 URL 및 이력 검색 회귀 검증](../docs/experiments/part6_final_service_validation.md)
+
 ## Vite 템플릿 참고
 
 This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.

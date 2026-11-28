@@ -26,7 +26,7 @@ function LiveAnalysis({ jobId, filename }: { jobId: string; filename?: string })
   return <AnalysisView
     jobId={jobId}
     phase={job?.status}
-    filename={filename}
+    filename={job?.original_filename ?? filename}
     queryError={error === undefined ? undefined : errorMessage(error)}
     onRetry={retry}
     failure={job?.error ? apiErrorMessage(job.error.code) : undefined}
@@ -72,7 +72,7 @@ function AnalysisView({ jobId, phase, filename, queryError, onRetry, failure, ex
       {failed && <p role="alert" className="error-message">{failure ?? '영상 분석에 실패했습니다. 영상을 다시 선택해 주세요.'}</p>}
       <div className="button-row justify-center">
         {queryError && <Button onClick={onRetry}>상태 다시 확인</Button>}
-        {phase === 'completed' && <Link className="button button-primary" to={resultsPath} state={state}><ScanLine size={18} aria-hidden="true" />결과 확인</Link>}
+        {phase === 'completed' && <Link className="button button-primary" to={resultsPath} state={filename ? { ...state, filename } : state}><ScanLine size={18} aria-hidden="true" />결과 확인</Link>}
         <HistoryBackLink />
         <Link to="/" className="button button-secondary">{failed ? '다른 영상 선택' : '영상 선택 화면으로'}</Link>
       </div>

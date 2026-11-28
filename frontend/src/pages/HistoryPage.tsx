@@ -24,12 +24,18 @@ function getPage(value: string | null) {
   return value && /^\d+$/.test(value) && page >= 1 && Number.isSafeInteger((page - 1) * PAGE_SIZE) ? page : 1
 }
 
+function readFilters(params: URLSearchParams) {
+  return {
+    search: normalizeSearch(params.get('search') ?? ''),
+    status: jobStates.find(state => state === params.get('status')),
+    sort: params.get('sort') === 'oldest' ? 'oldest' : 'newest',
+  } as const
+}
+
 export function HistoryPage() {
   const [params, setParams] = useSearchParams()
   const { pathname, search: urlSearch } = useLocation()
-  const search = normalizeSearch(params.get('search') ?? '')
-  const status = jobStates.find(state => state === params.get('status'))
-  const sort = params.get('sort') === 'oldest' ? 'oldest' : 'newest'
+  const { search, status, sort } = readFilters(params)
   const page = getPage(params.get('page'))
   const [draft, setDraft] = useState({ committed: search, value: search })
   const listHeading = useRef<HTMLHeadingElement>(null)
@@ -38,17 +44,19 @@ export function HistoryPage() {
   // 뒤로 가기에서 브라우저가 복원하는 입력값과 별개로 URL의 검색어를 적용한다.
   if (draft.committed !== search) setDraft({ committed: search, value: search })
 
-  function update({
-    nextSearch = search, nextStatus = status ?? '', nextSort = sort, nextPage = 1, replace = false,
-  }: {
+  function update(changes: {
     nextSearch?: string; nextStatus?: JobState | ''; nextSort?: JobHistoryQuery['sort']; nextPage?: number; replace?: boolean
   }) {
+    // 연속 입력은 React가 다시 그리기 전에 도착할 수 있다. 직전 조작이 반영된 주소에서 이어간다.
+    const current = new URLSearchParams(window.location.search)
+    const filters = readFilters(current)
+    const { nextSearch = filters.search, nextStatus = filters.status, nextSort = filters.sort, nextPage = 1, replace = false } = changes
     const next = new URLSearchParams()
     if (nextSearch) next.set('search', nextSearch)
     if (nextStatus) next.set('status', nextStatus)
     if (nextSort === 'oldest') next.set('sort', nextSort)
     if (nextPage > 1) next.set('page', String(nextPage))
-    if (next.toString() !== params.toString()) setParams(next, { replace })
+    if (next.toString() !== current.toString()) setParams(next, { replace })
   }
 
   function reset() {

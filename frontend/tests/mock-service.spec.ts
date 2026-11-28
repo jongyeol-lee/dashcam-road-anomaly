@@ -148,6 +148,40 @@ test.beforeEach(async ({ page }) => {
   await mockReviews(page)
 })
 
+test('상태와 결과의 직접 주소 및 새로고침에서 개별 작업 파일명을 복원한다', async ({ page }) => {
+  const filename = '검증 후방.mp4'
+  let heavyRequests = 0
+  let detailRequests = 0
+  page.on('request', request => {
+    if (jobsUrl(new URL(request.url())) || request.url().endsWith('/report')) heavyRequests++
+  })
+  await page.route(api + jobPath, route => {
+    detailRequests++
+    return json(route, { ...status(job, 'completed'), original_filename: filename })
+  })
+  await page.route(api + resultPath, route => json(route, { ...results(), original_filename: filename }))
+  for (const url of [jobPath, resultPath]) {
+    await page.goto(url)
+    await expect(page.getByText(filename, { exact: true })).toBeVisible()
+    await page.reload()
+    await expect(page.getByText(filename, { exact: true })).toBeVisible()
+  }
+  expect(detailRequests).toBe(2)
+  expect(heavyRequests).toBe(0)
+})
+
+test('직접 결과에서 파일명 정보를 사용할 수 없어도 장면과 검토를 사용할 수 있다', async ({ page }) => {
+  await mockVideoMetadata(page)
+  await page.route(api + jobPath, route => route.abort())
+  await page.route(api + resultPath, route => json(route, { ...results(), original_filename: {} }))
+  await page.goto(resultPath)
+  await expect(page.locator('.video-meta strong')).toHaveText('원본 영상')
+  await expect(rows(page)).toHaveCount(scenes.length)
+  await expect(page.locator('video')).toHaveAttribute('src', api + jobPath + '/video')
+  await reviewRadio(page, '판단 보류').click()
+  await expect(page.getByTestId('review-count')).toHaveText('1 / 3')
+})
+
 test('파일 선택, 변경, 취소 및 브라우저 입력 검증', async ({ page }) => {
   let posts = 0
   await page.route(jobsUrl, route => {
@@ -885,6 +919,32 @@ test.describe('분석 이력', () => {
     await expect(menu.getByRole('link', { name: '분석 이력' })).toHaveAttribute('aria-current', 'page')
     await expect(historyRows(page)).toHaveCount(7)
     expect(queries.at(-1)).toEqual({ limit: '20', offset: '0', sort: 'newest' })
+  })
+
+  test('검색 제출 직후 상태와 정렬을 바꿔도 뒤로 가기와 새로고침에서 세 조건을 복원한다', async ({ page }) => {
+    await page.goto('/history')
+    const search = historySearch(page)
+    await search.fill('Dashcam-Rear')
+    // 이전 렌더의 이벤트 핸들러가 남아 있는 동안 연속 입력하는 조건을 재현한다.
+    await page.locator('form.history-filters').evaluate((form: HTMLFormElement) => {
+      form.requestSubmit()
+      for (const [id, value] of [['history-status', 'completed'], ['history-sort', 'oldest']]) {
+        const select = form.querySelector<HTMLSelectElement>(`#${id}`)!
+        select.value = value
+        select.dispatchEvent(new Event('change', { bubbles: true }))
+      }
+    })
+    const url = '/history?search=Dashcam-Rear&status=completed&sort=oldest'
+    await expect(page).toHaveURL(url)
+    await button(page, '조건 초기화').click()
+    await expect(page).toHaveURL('/history')
+    await page.goBack()
+    await expect(page).toHaveURL(url)
+    await expect(search).toHaveValue('Dashcam-Rear')
+    await page.reload()
+    await expect(search).toHaveValue('Dashcam-Rear')
+    await expect(page.getByLabel('분석 상태', { exact: true })).toHaveValue('completed')
+    await expect(page.getByLabel('정렬', { exact: true })).toHaveValue('oldest')
   })
 
   test('같은 파일명의 상태별 작업에 들어가고 조건을 유지한 목록으로 돌아온다', async ({ page }) => {

@@ -23,7 +23,7 @@ from ..video import open_video_capture
 from ..video_analysis import MVP_SHA256, PROJECT_ROOT, analyze_video
 from .schemas import (
     AnalysisResults, ApiError, JobAnalysisSummary, JobHistory, JobHistoryItem, JobHistoryQuery, JobHistoryWarning,
-    JobReport, JobReviews, REPORT_SETTING_FIELDS, ReviewState, ReviewSummary, Scene, SceneReview, StoredJob, VideoInfo,
+    JobReport, JobReviews, REPORT_SETTING_FIELDS, ResultDetail, ReviewState, ReviewSummary, Scene, SceneReview, StoredJob, VideoInfo,
 )
 
 
@@ -265,7 +265,7 @@ class JobManager:
 
         # 완료 상태를 저장하기 전에 results.json을 게시한다. 완료된 결과는 바뀌지 않는다.
         try:
-            results = self._read_results(job_id)
+            results = self._read_results(job_id, AnalysisResults)
             event_ids = {scene.event_id for scene in results.events}
             if results.job_id != job_id or results.event_count != len(results.events) or len(event_ids) != len(results.events):
                 raise ValueError("Inconsistent stored results")
@@ -344,13 +344,16 @@ class JobManager:
     def _results_path(self, job_id: UUID) -> Path:
         return contained_path(self.settings.jobs_root, str(job_id), "results.json")
 
-    def _read_results(self, job_id: UUID) -> AnalysisResults:
-        return AnalysisResults.model_validate_json(self._results_path(job_id).read_text(encoding="utf-8"))
+    def _read_results[T: AnalysisResults](self, job_id: UUID, model: type[T]) -> T:
+        return model.model_validate_json(self._results_path(job_id).read_text(encoding="utf-8"))
 
-    def results(self, job_id: UUID) -> AnalysisResults:
-        if self.get(job_id).status != "completed":
+    def results(self, job_id: UUID) -> ResultDetail:
+        job = self.get(job_id)
+        if job.status != "completed":
             raise JobError(409, "results_not_ready", "완료된 작업의 결과만 조회할 수 있습니다.")
-        return self._read_results(job_id)
+        result = self._read_results(job_id, ResultDetail)
+        result.original_filename = job.original_filename
+        return result
 
     def report(self, job_id: UUID) -> JobReport:
         # 검토 저장과 같은 잠금에서 작업·분석·검토 파일의 한 시점 상태를 읽는다.
@@ -364,7 +367,7 @@ class JobManager:
             if job.status != "completed":
                 raise JobError(409, "results_not_ready", "완료된 작업의 리포트만 조회할 수 있습니다.")
             try:
-                results = self._read_results(job_id)
+                results = self._read_results(job_id, AnalysisResults)
                 event_ids = {scene.event_id for scene in results.events}
                 if (results.job_id != job_id or results.event_count != len(results.events)
                         or len(event_ids) != results.event_count

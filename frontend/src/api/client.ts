@@ -246,14 +246,22 @@ export function getJobHistory(query: JobHistoryQuery, signal: AbortSignal) {
     (value): value is JobHistory => isJobHistory(value, query))
 }
 
-export function getJob(jobId: string, signal: AbortSignal) {
-  return request(`/api/jobs/${encodeURIComponent(jobId)}`, { signal, cache: 'no-store' }, 200,
-    (value): value is JobStatus => isJobStatus(value) && value.job_id === jobId.toLowerCase())
+// 구버전 응답에 이름이 없거나 형식이 달라도 영상과 검토는 사용할 수 있다.
+function withStoredFilename<T extends object>(value: T) {
+  const name = 'original_filename' in value ? value.original_filename : null
+  return { ...value, original_filename: typeof name === 'string' && name.trim() ? name : null }
 }
 
-export function getResults(jobId: string, signal: AbortSignal) {
-  return request(`/api/jobs/${encodeURIComponent(jobId)}/results`, { signal, cache: 'no-store' }, 200,
+export async function getJob(jobId: string, signal: AbortSignal) {
+  const job = await request(`/api/jobs/${encodeURIComponent(jobId)}`, { signal, cache: 'no-store' }, 200,
+    (value): value is JobStatus => isJobStatus(value) && value.job_id === jobId.toLowerCase())
+  return withStoredFilename(job)
+}
+
+export async function getResults(jobId: string, signal: AbortSignal) {
+  const result = await request(`/api/jobs/${encodeURIComponent(jobId)}/results`, { signal, cache: 'no-store' }, 200,
     (value): value is AnalysisResults => isResults(value, jobId))
+  return withStoredFilename(result)
 }
 
 export function getJobReport(jobId: string, signal: AbortSignal) {

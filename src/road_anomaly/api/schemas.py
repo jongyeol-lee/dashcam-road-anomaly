@@ -46,9 +46,8 @@ class JobStatus(ResponseModel):
     error: ApiError | None = None
 
 
-class StoredJob(JobStatus):
+class JobDetail(JobStatus):
     original_filename: str | None = Field(default=None, max_length=MAX_FILENAME_LENGTH)
-    file_size_bytes: int | None = Field(default=None, ge=0)
 
     @field_validator("original_filename")
     @classmethod
@@ -56,6 +55,10 @@ class StoredJob(JobStatus):
         if value is not None and (not value or value != normalize_upload_filename(value)):
             raise ValueError("Invalid stored upload filename")
         return value
+
+
+class StoredJob(JobDetail):
+    file_size_bytes: int | None = Field(default=None, ge=0)
 
     def to_storage(self) -> dict:
         # 파일 정보 없이 생성된 작업은 상태를 갱신해도 기존 키 구성을 유지한다.
@@ -102,6 +105,10 @@ class AnalysisResults(ResponseModel):
     settings: dict[str, JsonValue]
     timestamp_basis: str
     events: list[Scene]
+
+
+class ResultDetail(AnalysisResults):
+    original_filename: str | None = Field(default=None, max_length=MAX_FILENAME_LENGTH)
 
 
 class ReviewUpdate(ResponseModel):
